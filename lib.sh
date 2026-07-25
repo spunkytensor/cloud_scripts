@@ -59,6 +59,8 @@ write_state() {
     printf 'DROPLET_IP=%q\n' "${droplet_ip}"
     printf 'DROPLET_NAME=%q\n' "${droplet_name}"
     printf 'KNOWN_HOSTS_FILE=%q\n' "${VPS_STATE_FILE}.known_hosts"
+    printf 'SSH_CONFIG_FILE=%q\n' "${VPS_STATE_FILE}.ssh_config"
+    printf 'SSH_ALIAS=%q\n' "codex-vps-${droplet_id}"
     printf 'CREATED_AT=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >"${temporary_state}" || {
     rm -f "${temporary_state}"

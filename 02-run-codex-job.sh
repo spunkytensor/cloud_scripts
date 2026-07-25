@@ -25,6 +25,13 @@ CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 [[ -s "${CODEX_AUTH_FILE}" ]] || die "file-backed Codex credentials not found at ${CODEX_AUTH_FILE}; see README.md"
 validate_codex_auth "${CODEX_AUTH_FILE}" || die "Codex credential file does not contain valid ChatGPT account tokens: ${CODEX_AUTH_FILE}"
 
+if remote_ssh '/usr/local/bin/codex app-server daemon version >/dev/null 2>&1'; then
+  die "remote-control daemon is active; stop it before running a standalone batch job"
+fi
+if remote_ssh 'test -e /home/agent/.codex/auth.json'; then
+  die "remote host already has Codex credentials; use either persistent remote control or the temporary batch credential workflow, not both"
+fi
+
 if [[ -n "${GH_TOKEN:-}" ]]; then
   github_token="${GH_TOKEN}"
 elif [[ -n "${GITHUB_TOKEN:-}" ]]; then

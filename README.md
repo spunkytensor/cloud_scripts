@@ -1,6 +1,6 @@
 # Disposable DigitalOcean Codex worker
 
-These scripts create a DigitalOcean Droplet, run a complete Codex development job against a GitHub repository using your existing Codex ChatGPT-account credentials, push the resulting branch, open a draft pull request, and destroy the Droplet.
+These scripts create a DigitalOcean Droplet and support two mutually exclusive Codex modes: persistent headless remote control from an authorized Codex/ChatGPT client, or a one-shot batch development job that pushes a branch and opens a draft pull request.
 
 The remote Codex process operates directly on the VPS checkout. The local scripts are the control plane.
 
@@ -8,7 +8,8 @@ The remote Codex process operates directly on the VPS checkout. The local script
 
 - A Droplet is billable until `03-destroy.sh` successfully deletes it. Powering it off is not enough.
 - `demo.sh` destroys the Droplet on success or failure unless `KEEP_VPS=1` is set. If a possibly rotated Codex credential cannot be retrieved safely, it instead marks and preserves the billable VPS so you can recover the credential before deletion.
-- The scripts copy `~/.codex/auth.json` into the disposable VPS with mode `0600`. The GitHub token is sent only for the clone and publish phases and is deleted before Codex or repository-controlled commands run. Neither credential is placed in cloud-init, the Droplet image, or command arguments.
+- Batch mode copies `~/.codex/auth.json` into the disposable VPS with mode `0600`. The GitHub token is sent only for the clone and publish phases and is deleted before Codex or repository-controlled commands run. Neither credential is placed in cloud-init, the Droplet image, or command arguments.
+- Remote-control mode performs a separate ChatGPT device login on the VPS and never copies the local Codex credential. Do not run batch mode against a host enrolled for remote control.
 - Codex may refresh its account token. `02-run-codex-job.sh` retrieves the potentially updated auth file and atomically synchronizes it back only if the local file has not changed concurrently.
 - Do not run another Codex process using the same file-backed credentials during a remote job. For production automation, prefer an OpenAI API key, or a Codex access token where available, over copying personal account credentials.
 - The Codex process necessarily has access to its own account credential. A malicious repository instruction or command could attempt to print it into the captured job log. Use this personal-account demonstration only with repositories you trust; a dedicated API credential and proxy boundary are safer for unattended production use.
@@ -102,21 +103,58 @@ At minimum, set:
 
 The script records the Droplet ID, IP, and a dedicated SSH known-hosts file under `.state/`. If provisioning fails after DigitalOcean creates the machine, this state remains available for cleanup.
 
-After provisioning, connect directly as the unprivileged user:
+It also writes a concrete OpenSSH host entry to `.state/current.env.ssh_config`. Use it directly:
 
 ```bash
-source config.env
 source .state/current.env
-ssh -i "$SSH_PRIVATE_KEY_FILE" agent@"$DROPLET_IP"
+ssh -F "$SSH_CONFIG_FILE" "$SSH_ALIAS"
+```
+
+To let the Codex desktop app discover the host, add this line to `~/.ssh/config` using the absolute generated path:
+
+```sshconfig
+Include /absolute/path/to/vps-codex/.state/current.env.ssh_config
 ```
 
 Remote root login is disabled.
 
-### 2. Execute the Codex job and stage a draft PR
+### 2A. Enable persistent headless remote control
+
+Remote control requires Codex CLI 0.143.0 or newer. Allocation verifies that minimum version. Then run:
+
+```bash
+./02-enable-remote-control.sh
+```
+
+The script:
+
+1. Verifies the remote Codex version.
+2. Starts a headless ChatGPT device-login flow if the VPS is not logged in. Open the displayed URL on an authorized device and enter its code.
+3. Starts the detached Codex remote-control daemon.
+4. Prints a short-lived manual pairing code for the Codex/ChatGPT client.
+
+The VPS login must use the same ChatGPT account and workspace as the controlling client. API-key and access-token logins are rejected because they do not enroll the host for direct remote control. No inbound app-server port is opened; the daemon uses the Codex secure relay.
+
+The daemon survives SSH logout, but not a VPS reboot. Rerun `02-enable-remote-control.sh` after reboot to restart it and obtain a new pairing code.
+
+Persistent projects belong under `/workspace/projects`. For example, after configuring Git credentials on the VPS:
+
+```bash
+source .state/current.env
+ssh -F "$SSH_CONFIG_FILE" "$SSH_ALIAS"
+cd /workspace/projects
+git clone https://github.com/owner/repository.git
+```
+
+Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be attached to as live remote-control sessions. Start new work through the paired client.
+
+### 2B. Execute a one-shot Codex job and stage a draft PR
 
 ```bash
 ./02-run-codex-job.sh
 ```
+
+This mode is separate from persistent remote control. It refuses to run when a remote-control daemon or persistent remote Codex credential is present.
 
 The remote worker:
 
@@ -133,17 +171,17 @@ The remote worker:
 
 If credential synchronization is uncertain, read the generated `AUTH-RECOVERY.txt`. `demo.sh` will leave the VPS running and billable rather than destroy the only potentially valid refresh token. After recovery, run `03-destroy.sh` explicitly.
 
-### 3. Destroy the VPS
+### 3. Stop remote control and destroy the VPS
 
 ```bash
 ./03-destroy.sh
 ```
 
-Run this even if the job fails. It deletes the Droplet rather than merely powering it off.
+Run this even if a job fails. It attempts to stop the remote-control daemon, then deletes the Droplet rather than merely powering it off. Remove the environment from the controlling client if it remains listed after destruction.
 
 ## One-command demonstration
 
-After configuring the repository and task, run all three stages with automatic cleanup:
+After configuring the repository and task, run allocation, the one-shot batch job, and destruction with automatic cleanup:
 
 ```bash
 ./demo.sh

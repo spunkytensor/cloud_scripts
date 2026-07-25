@@ -87,6 +87,17 @@ done
 write_state "${droplet_id}" "${droplet_ip}" "${DROPLET_NAME}"
 load_state
 
+cat >"${SSH_CONFIG_FILE}" <<EOF
+Host ${SSH_ALIAS}
+  HostName ${DROPLET_IP}
+  User ${REMOTE_SSH_USER}
+  IdentityFile "${SSH_PRIVATE_KEY_FILE}"
+  IdentitiesOnly yes
+  UserKnownHostsFile "${KNOWN_HOSTS_FILE}"
+  StrictHostKeyChecking accept-new
+EOF
+chmod 0600 "${SSH_CONFIG_FILE}"
+
 log "Droplet ${DROPLET_ID} is ${DROPLET_IP}; waiting for SSH as ${REMOTE_SSH_USER}"
 for attempt in {1..120}; do
   if remote_ssh true >/dev/null 2>&1; then
@@ -101,5 +112,6 @@ done
 log "waiting for cloud-init (this installs Docker, Node.js, GitHub CLI, and Codex)"
 remote_ssh 'cloud-init status --wait >/dev/null && test -f /opt/codex-worker-ready'
 
-printf 'Droplet ready\n  id: %s\n  ip: %s\n  state: %s\n' \
-  "${DROPLET_ID}" "${DROPLET_IP}" "${VPS_STATE_FILE}"
+printf 'Droplet ready\n  id: %s\n  ip: %s\n  state: %s\n  SSH alias: %s\n  SSH config: %s\n\nConnect with:\n  ssh -F %q %q\n\nEnable headless Codex remote control with:\n  ./02-enable-remote-control.sh\n' \
+  "${DROPLET_ID}" "${DROPLET_IP}" "${VPS_STATE_FILE}" "${SSH_ALIAS}" "${SSH_CONFIG_FILE}" \
+  "${SSH_CONFIG_FILE}" "${SSH_ALIAS}"

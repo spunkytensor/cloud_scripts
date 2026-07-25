@@ -56,16 +56,20 @@ write_files:
       curl -fSLo "${codex_setup}" https://chatgpt.com/codex/install.sh
       chown agent:agent "${codex_setup}"
       runuser -u agent -- env HOME=/home/agent sh "${codex_setup}"
+      ln -sfn /home/agent/.local/bin/codex /usr/local/bin/codex
 
       install -d -o agent -g agent -m 0755 \
         /workspace \
         /workspace/jobs \
+        /workspace/projects \
         /home/agent/.codex \
         /home/agent/.config/vps-codex
 
       command -v docker >/dev/null
       command -v node >/dev/null
-      test -x /home/agent/.local/bin/codex
+      test -x /usr/local/bin/codex
+      codex_version="$(codex --version | awk '{print $2}')"
+      dpkg --compare-versions "${codex_version}" ge 0.143.0
       touch /opt/codex-worker-ready
 
 runcmd:
