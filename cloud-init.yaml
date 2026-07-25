@@ -1,0 +1,72 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+users:
+  - default
+  - name: agent
+    gecos: Codex worker
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - __AGENT_SSH_AUTHORIZED_KEY__
+
+packages:
+  - bash
+  - build-essential
+  - ca-certificates
+  - curl
+  - docker.io
+  - git
+  - gh
+  - jq
+  - rsync
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/60-codex-worker.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      PermitEmptyPasswords no
+      PermitRootLogin no
+      AllowUsers agent
+  - path: /etc/sysctl.d/60-codex-worker.conf
+    permissions: "0644"
+    content: |
+      fs.inotify.max_user_watches=524288
+      fs.inotify.max_user_instances=1024
+  - path: /usr/local/sbin/bootstrap-codex-worker
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      systemctl restart ssh
+      systemctl enable --now docker
+
+      node_setup="$(mktemp)"
+      codex_setup="$(mktemp)"
+      trap 'rm -f "${node_setup}" "${codex_setup}"' EXIT
+
+      curl -fSLo "${node_setup}" https://deb.nodesource.com/setup_22.x
+      bash "${node_setup}"
+      apt-get install -y nodejs
+      corepack enable || true
+
+      curl -fSLo "${codex_setup}" https://chatgpt.com/codex/install.sh
+      chown agent:agent "${codex_setup}"
+      runuser -u agent -- env HOME=/home/agent sh "${codex_setup}"
+
+      install -d -o agent -g agent -m 0755 \
+        /workspace \
+        /workspace/jobs \
+        /home/agent/.codex \
+        /home/agent/.config/vps-codex
+
+      command -v docker >/dev/null
+      command -v node >/dev/null
+      test -x /home/agent/.local/bin/codex
+      touch /opt/codex-worker-ready
+
+runcmd:
+  - /usr/local/sbin/bootstrap-codex-worker
