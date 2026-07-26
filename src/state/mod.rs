@@ -135,7 +135,7 @@ impl Store {
         let path = self.dir(id).join(name);
         if path.exists() {
             fs::remove_file(path)?;
-            File::open(self.dir(id))?.sync_all()?;
+            sync_dir(&self.dir(id))?;
         }
         Ok(())
     }
@@ -192,7 +192,7 @@ fn atomic_bytes(p: &Path, value: &[u8]) -> Result<()> {
     f.sync_all()?;
     drop(f);
     fs::rename(&tmp, p)?;
-    File::open(d)?.sync_all()?;
+    sync_dir(d)?;
     Ok(())
 }
 fn atomic_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
@@ -213,7 +213,17 @@ fn atomic_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
     o.sync_all()?;
     drop(o);
     fs::rename(&tmp, p)?;
-    File::open(d)?.sync_all()?;
+    sync_dir(d)?;
+    Ok(())
+}
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) -> Result<()> {
+    // Windows does not permit opening a directory through std::fs::File.
     Ok(())
 }
 #[cfg(unix)]

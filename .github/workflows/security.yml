@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Repository configuration and secret gate
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: misconfig,secret
@@ -43,9 +43,9 @@ jobs:
           output: trivy-config-secret.txt
           exit-code: '1'
           severity: HIGH,CRITICAL
-          version: v0.59.1
+          version: v0.72.0
       - name: Repository vulnerability gate
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln
@@ -55,9 +55,9 @@ jobs:
           exit-code: '1'
           ignore-unfixed: false
           severity: HIGH,CRITICAL
-          version: v0.59.1
+          version: v0.72.0
       - name: Produce SARIF
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln,misconfig,secret
@@ -66,7 +66,7 @@ jobs:
           output: trivy.sarif
           exit-code: '0'
           severity: HIGH,CRITICAL
-          version: v0.59.1
+          version: v0.72.0
       - name: Upload SARIF in trusted context
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@3c3833e0f8c1c83d449a7478aa59c036a9165498 # v3.28.17

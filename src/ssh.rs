@@ -16,11 +16,11 @@ fn base(server: &Server, key: &Path, known: &Path, tofu: bool) -> Result<Command
     if let Some(parent) = known.parent() {
         fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new().create(true).append(true).open(known)?;
+    let _file = OpenOptions::new().create(true).append(true).open(known)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        _file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     let mut c = Command::new("ssh");
     c.arg("-i")

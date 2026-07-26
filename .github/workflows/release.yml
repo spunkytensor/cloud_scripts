@@ -113,15 +113,15 @@ jobs:
           if [[ '${{ matrix.kind }}' == tar ]]; then tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
           if [[ '${{ matrix.kind }}' == zip ]]; then 7z a "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.zip" ./stage/*; fi
       - name: Generate CycloneDX SBOM from final staged filesystem
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: target/stage
           format: cyclonedx
           output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
-          version: v0.59.1
+          version: v0.72.0
       - name: Gate staged filesystem
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: target/stage
@@ -129,16 +129,16 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: '1'
-          version: v0.59.1
+          version: v0.72.0
       - name: Gate generated SBOM
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: sbom
           scan-ref: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
           severity: HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: '1'
-          version: v0.59.1
+          version: v0.72.0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.target }}
