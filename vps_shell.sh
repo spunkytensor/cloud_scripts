@@ -11,6 +11,16 @@ instance_id="$1"
 
 load_config true
 select_instance_state "${instance_id}"
+if [[ -f "${VPS_STATE_FILE}.transition" ]]; then
+  load_transition_state
+  if [[ "${TRANSITION_PHASE}" != active-snapshot-cleanup-pending ]]; then
+    die "instance is ${TRANSITION_PHASE}; wait for or resume the lifecycle operation"
+  fi
+elif [[ -f "${VPS_STATE_FILE}.paused" && -f "${VPS_STATE_FILE}" ]]; then
+  die "instance has contradictory active and paused state; inspect or destroy it before connecting"
+elif [[ -f "${VPS_STATE_FILE}.paused" ]]; then
+  die "instance is paused; resume it with: ./vps_resume.sh --instance ${instance_id}"
+fi
 unset SSH_ALIAS SSH_CONFIG_FILE
 load_state
 require_command ssh

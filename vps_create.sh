@@ -39,6 +39,8 @@ done
 [[ "${create_new_instance}" == true || "${instance_option_seen}" == true ]] || die "usage: ./vps_create.sh (--new | --instance INSTANCE_ID) OWNER/REPOSITORY,BASE_BRANCH"
 [[ -n "${repository_argument}" ]] || die "usage: ./vps_create.sh (--new | --instance INSTANCE_ID) OWNER/REPOSITORY,BASE_BRANCH"
 
+# load_config's optional argument is an internal compatibility switch.
+# shellcheck disable=SC2119
 load_config
 [[ "${repository_argument}" == *,* && "${repository_argument#*,}" != *,* ]] ||
   die "repository argument must be exactly OWNER/REPOSITORY,BASE_BRANCH"
@@ -147,6 +149,16 @@ install -d -m 0700 "${state_dir}" || die "cannot create state directory: ${state
 state_probe="$(mktemp "${VPS_STATE_FILE}.probe.XXXXXX")" || die "state directory is not writable: ${state_dir}"
 rm -f "${state_probe}"
 acquire_lifecycle_lock
+
+if [[ -f "${VPS_STATE_FILE}.paused" && -f "${VPS_STATE_FILE}" ]]; then
+  die "instance has contradictory active and paused state; run ${destroy_command} to reconcile it"
+elif [[ -f "${VPS_STATE_FILE}.paused" ]]; then
+  die "instance is paused; restore its disk with: ./vps_resume.sh --instance ${instance_id}"
+fi
+if [[ -f "${VPS_STATE_FILE}.transition" ]]; then
+  load_transition_state
+  die "instance has unresolved lifecycle phase ${TRANSITION_PHASE}; rerun the corresponding pause/resume command"
+fi
 
 setup_state_file="${VPS_STATE_FILE}.setup"
 if [[ -f "${setup_state_file}" ]]; then
@@ -257,7 +269,7 @@ else
     write_allocation_state
     log "requesting ${ALLOCATION_DROPLET_NAME} (${ALLOCATION_SIZE}, ${ALLOCATION_REGION}, ${ALLOCATION_IMAGE}) from DigitalOcean"
     set +e
-    response="$(doctl compute droplet create "${ALLOCATION_DROPLET_NAME}" \
+    response="$(doctl_mutate compute droplet create "${ALLOCATION_DROPLET_NAME}" \
       --region "${ALLOCATION_REGION}" \
       --size "${ALLOCATION_SIZE}" \
       --image "${ALLOCATION_IMAGE}" \
@@ -337,32 +349,9 @@ done
 write_state "${droplet_id}" "${droplet_ip}" "${droplet_name}"
 load_state
 
-install -m 0600 /dev/null "${SSH_CONFIG_FILE}"
-cat >"${SSH_CONFIG_FILE}" <<EOF
-Host ${SSH_ALIAS}
-  HostName ${DROPLET_IP}
-  User ${REMOTE_SSH_USER}
-  IdentityFile "${SSH_PRIVATE_KEY_FILE}"
-  IdentitiesOnly yes
-  UserKnownHostsFile "${KNOWN_HOSTS_FILE}"
-  StrictHostKeyChecking accept-new
-EOF
-
-log "Droplet ${DROPLET_ID} is ${DROPLET_IP}; waiting for SSH as ${REMOTE_SSH_USER}"
-for attempt in {1..120}; do
-  if remote_ssh true >/dev/null 2>&1; then
-    break
-  fi
-  if (( attempt == 120 )); then
-    die "SSH for ${REMOTE_SSH_USER} did not become ready"
-  fi
-  sleep 5
-done
-
-log "waiting for cloud-init (this installs Docker, Node.js, GitHub CLI, and Codex)"
-remote_ssh 'cloud-init status --wait >/dev/null && test -f /opt/codex-worker-ready'
-remote_ssh 'id -nG | tr " " "\n" | grep -Fxq docker && docker info >/dev/null' ||
-  die "agent does not have working Docker access; this Droplet may predate Docker-enabled provisioning. Recreate it with ${destroy_command} followed by ${create_command}, or use the DigitalOcean root console to run: usermod -aG docker agent"
+write_ssh_endpoint accept-new || die "could not persist the SSH endpoint"
+log "Droplet ${DROPLET_ID} is ${DROPLET_IP}"
+wait_for_worker_boot false
 
 token_state_file="${VPS_STATE_FILE}.github-token"
 replacement_journal_file="${token_state_file}.replacement"
@@ -430,6 +419,8 @@ install_remote_github_token() {
   local token_sync_status
 
   set +e
+  # The single-quoted program is expanded by the remote Bash, not locally.
+  # shellcheck disable=SC2016
   printf '%s' "${github_token}" | remote_exec bash -c '
   set -euo pipefail
   replacement_allowed="$1"
@@ -458,6 +449,8 @@ classify_remote_replacement_token() {
   local old_token="$1"
   local new_token="$2"
 
+  # The single-quoted program is expanded by the remote Bash, not locally.
+  # shellcheck disable=SC2016
   printf '%s\n%s\n' "${old_token}" "${new_token}" | remote_exec bash -c '
     set -euo pipefail
     token_file=/home/agent/.config/vps-codex/github-token
