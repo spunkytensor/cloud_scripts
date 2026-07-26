@@ -979,11 +979,14 @@ Produce at least:
 | OS | Target | Artifact |
 |---|---|---|
 | macOS | `aarch64-apple-darwin` | `vps-<version>-aarch64-apple-darwin.tar.gz` |
-| macOS | `x86_64-apple-darwin` | `vps-<version>-x86_64-apple-darwin.tar.gz` |
 | Windows | `x86_64-pc-windows-msvc` | `vps-<version>-x86_64-pc-windows-msvc.zip` |
 | Windows | `aarch64-pc-windows-msvc` | archive after SSH/PTY support is verified; otherwise document x64-only initially |
 | Ubuntu | `x86_64-unknown-linux-gnu` | `vps_<version>_amd64.deb` |
-| Ubuntu | `aarch64-unknown-linux-gnu` | `vps_<version>_arm64.deb` |
+
+macOS x64 and Ubuntu arm64 packaging are explicitly disabled in the current
+release matrix. Re-enabling either target requires restoring its native build,
+smoke-test, SBOM, and staged-filesystem scan job rather than publishing an
+untested cross-compiled artifact.
 
 Build macOS artifacts on GitHub-hosted macOS and Windows MSVC artifacts on
 Windows. Build `.deb` binaries on the oldest supported Ubuntu/glibc baseline or
@@ -1018,8 +1021,7 @@ Trigger only for a signed/approved `v*` tag and manual dry runs:
    allow.
 6. Build `.deb` packages with explicit architecture, dependencies, metadata,
    and file modes.
-7. Install/smoke-test artifacts on their native OS/architecture or an approved
-   emulator for Linux arm64.
+7. Install/smoke-test artifacts on their native OS/architecture.
 8. Generate CycloneDX SBOMs and third-party notices.
 9. Run Trivy against staged/extracted artifacts and SBOMs.
 10. Generate SHA-256 checksums for every published file.
@@ -1187,9 +1189,9 @@ multi-backend-ready with DigitalOcean support.
       reviewed, expiring exceptions only.
 - [ ] Trivy scans source/config/secrets, release filesystems, and SBOMs and fails
       on unapproved high/critical findings.
-- [ ] macOS arm64/x64, Windows x64, Ubuntu amd64, and Ubuntu arm64 artifacts are
-      built and smoke-tested; Windows arm64 is either verified or explicitly
-      deferred.
+- [ ] macOS arm64, Windows x64, and Ubuntu amd64 artifacts are built and
+      smoke-tested; macOS x64, Ubuntu arm64, and Windows arm64 remain explicitly
+      deferred until their native release jobs are restored and verified.
 - [ ] Ubuntu `.deb` installation/removal is tested on the supported baseline.
 - [ ] Releases include checksums, SBOMs, third-party notices, and provenance.
 - [ ] Documentation accurately describes backend support, prerequisites,

@@ -6,7 +6,7 @@ The remote Codex process operates directly on the VPS checkout. The local Rust e
 
 ## Install and build `vps`
 
-Tagged releases publish checksummed archives for macOS arm64/x64 and Windows x64, plus Ubuntu amd64/arm64 `.deb` packages. Release assets include shell completions, a man page, third-party notices, CycloneDX SBOMs, and build provenance.
+Tagged releases publish checksummed archives for macOS arm64 and Windows x64, plus Ubuntu amd64 `.deb` packages. macOS x64 and Ubuntu arm64 packages are currently disabled. Release assets include shell completions, a man page, third-party notices, CycloneDX SBOMs, and build provenance.
 
 Builds are pinned to Rust 1.96.1 with edition 2024:
 
