@@ -6,8 +6,54 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+instance_id=""
+create_new_instance=false
+instance_option_seen=false
+while (( $# > 0 )); do
+  case "$1" in
+    --new)
+      [[ "${create_new_instance}" != true ]] || die "--new may only be specified once"
+      create_new_instance=true
+      shift
+      ;;
+    --instance)
+      (( $# >= 2 )) || die "--instance requires an instance ID"
+      [[ "${instance_option_seen}" != true ]] || die "--instance may only be specified once"
+      [[ -n "$2" ]] || die "--instance requires a nonempty instance ID"
+      instance_option_seen=true
+      instance_id="$2"
+      shift 2
+      ;;
+    *)
+      die "usage: ./create.sh [--new | --instance INSTANCE_ID]"
+      ;;
+  esac
+done
+[[ "${create_new_instance}" != true || "${instance_option_seen}" != true ]] || die "--new and --instance cannot be combined"
+[[ "${create_new_instance}" == true || "${instance_option_seen}" == true ]] || die "usage: ./create.sh (--new | --instance INSTANCE_ID)"
+
 load_config
+if [[ "${create_new_instance}" == true ]]; then
+  install -d -m 0700 "$(instance_state_root)" || die "cannot create instance state directory: $(instance_state_root)"
+  instance_id=""
+  for attempt in {1..20}; do
+    candidate_instance_id="worker-$(date -u +%Y%m%d-%H%M%S)-$$-${RANDOM}"
+    if mkdir -m 0700 "$(instance_state_root)/${candidate_instance_id}" 2>/dev/null; then
+      instance_id="${candidate_instance_id}"
+      break
+    fi
+  done
+  [[ -n "${instance_id}" ]] || die "could not reserve a unique instance ID after 20 attempts"
+  instance_option_seen=true
+fi
+select_instance_state "${instance_id}"
+instance_arguments=" --instance ${instance_id}"
+log "using instance ${instance_id}"
+create_command="./create.sh${instance_arguments}"
+destroy_command="./destroy.sh${instance_arguments}"
+
 require_command doctl
+require_command git
 require_command gh
 require_command jq
 require_command ssh
@@ -20,10 +66,10 @@ require_command ssh-keygen
 [[ -f "${SSH_PRIVATE_KEY_FILE}.pub" ]] || die "SSH public key not found: ${SSH_PRIVATE_KEY_FILE}.pub"
 [[ -n "${REPOSITORY:-}" ]] || die "REPOSITORY is required in ${CONFIG_FILE}"
 [[ -n "${BASE_BRANCH:-}" ]] || die "BASE_BRANCH is required in ${CONFIG_FILE}"
-configured_work_branch="${WORK_BRANCH:-}"
-WORK_BRANCH="${configured_work_branch:-codex/vps-$(date +%Y%m%d-%H%M%S)-${RANDOM}}"
+WORK_BRANCH="codex/${instance_id}"
 [[ "${BASE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "BASE_BRANCH contains unsupported characters"
 [[ "${WORK_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "WORK_BRANCH contains unsupported characters"
+git check-ref-format --branch "${WORK_BRANCH}" >/dev/null 2>&1 || die "WORK_BRANCH is not a valid Git branch: ${WORK_BRANCH}"
 
 repository="${REPOSITORY#https://github.com/}"
 repository="${repository#git@github.com:}"
@@ -39,7 +85,7 @@ cleanup() {
   [[ -z "${cloud_init_file}" ]] || rm -f "${cloud_init_file}"
   release_lifecycle_lock
   if (( status != 0 )) && [[ -e "${VPS_STATE_FILE}" || -e "${VPS_STATE_FILE}.allocation" ]]; then
-    printf '\nSetup stopped. The Droplet remains allocated and may be billable.\nResume with:\n  ./create.sh\n\nAbandon and clean up with:\n  ./destroy.sh\n' >&2
+    printf '\nSetup stopped. The Droplet remains allocated and may be billable.\nResume with:\n  %s\n\nAbandon and clean up with:\n  %s\n' "${create_command}" "${destroy_command}" >&2
   fi
   return "${status}"
 }
@@ -73,7 +119,7 @@ else
     "${VPS_STATE_FILE}.github-token.replacement" \
     "${VPS_STATE_FILE}.setup" \
     "${VPS_STATE_FILE}.remote-control"; do
-    [[ ! -e "${orphaned_state}" ]] || die "orphaned lifecycle state exists at ${orphaned_state}; run ./destroy.sh before creating another Droplet"
+    [[ ! -e "${orphaned_state}" ]] || die "orphaned lifecycle state exists at ${orphaned_state}; run ${destroy_command} before creating another Droplet"
   done
 
   cloud_init_file="$(mktemp "${state_dir}/cloud-init.XXXXXX.yaml")" || die "cannot create rendered cloud-init file"
@@ -86,7 +132,7 @@ else
     # shellcheck disable=SC1090
     source "${allocation_state_file}"
   else
-    ALLOCATION_DROPLET_NAME="${DROPLET_NAME:-codex-agent-$(date +%Y%m%d-%H%M%S)}"
+    ALLOCATION_DROPLET_NAME="${DROPLET_NAME_PREFIX:-codex-agent}-${VPS_INSTANCE_ID}"
     ALLOCATION_REGION="${DO_REGION:-nyc3}"
     ALLOCATION_SIZE="${DO_SIZE:-s-4vcpu-8gb}"
     ALLOCATION_IMAGE="${DO_IMAGE:-ubuntu-24-04-x64}"
@@ -123,7 +169,7 @@ else
       rm -f "${allocation_state_file}"
       log "recovered Droplet ${droplet_id} from the earlier allocation request"
     elif [[ "${allocation_count}" == 0 ]]; then
-      die "the earlier allocation request has no visible Droplet yet; retry later, or run ./destroy.sh to clear the checkpoint after confirming no Droplet exists"
+      die "the earlier allocation request has no visible Droplet yet; retry later, or run ${destroy_command} to clear the checkpoint after confirming no Droplet exists"
     else
       die "multiple Droplets have lifecycle tag ${ALLOCATION_LIFECYCLE_TAG}; delete the extras manually before continuing"
     fi
@@ -149,13 +195,13 @@ else
       http_status="$(doctl_http_status <<<"${response}")"
       if [[ "${http_status}" =~ ^4[0-9]{2}$ && "${http_status}" != 408 && "${http_status}" != 429 ]]; then
         rm -f "${allocation_state_file}"
-        die "DigitalOcean rejected the allocation request; no request checkpoint was retained, so fix the reported error and rerun ./create.sh"
+        die "DigitalOcean rejected the allocation request; no request checkpoint was retained, so fix the reported error and rerun ${create_command}"
       fi
-      die "the allocation result is uncertain; rerun ./create.sh to reconcile by lifecycle tag or use ./destroy.sh after confirming no resource was created"
+      die "the allocation result is uncertain; rerun ${create_command} to reconcile by lifecycle tag or use ${destroy_command} after confirming no resource was created"
     fi
 
     if ! droplet_id="$(jq -er '.[0].id' <<<"${response}")"; then
-      die "DigitalOcean returned an unrecognized create response; rerun to reconcile by lifecycle tag"
+      die "DigitalOcean returned an unrecognized create response; rerun ${create_command} to reconcile by lifecycle tag"
     fi
     droplet_name="${ALLOCATION_DROPLET_NAME}"
     if ! write_state "${droplet_id}" "" "${droplet_name}"; then
@@ -171,7 +217,7 @@ else
         die "rolled back Droplet ${droplet_id} after the state write failed"
       fi
       [[ -z "${rollback_output}" ]] || printf '%s\n' "${rollback_output}" >&2
-      die "rollback failed: Droplet ${droplet_id} (${droplet_name}) may still be running and billable; delete that ID manually or run ./destroy.sh to reconcile its lifecycle tag"
+      die "rollback failed: Droplet ${droplet_id} (${droplet_name}) may still be running and billable; delete that ID manually or run ${destroy_command} to reconcile its lifecycle tag"
     fi
     rm -f "${allocation_state_file}"
     log "DigitalOcean accepted the request as Droplet ${droplet_id}; cleanup state saved to ${VPS_STATE_FILE}"
@@ -180,15 +226,17 @@ fi
 
 setup_state_file="${VPS_STATE_FILE}.setup"
 if [[ -f "${setup_state_file}" ]]; then
+  unset SETUP_REPOSITORY SETUP_BASE_BRANCH SETUP_WORK_BRANCH SETUP_INSTANCE_ID SETUP_CREDENTIAL_ISOLATION_VERSION
   # Generated below with shell-escaped values.
   # shellcheck disable=SC1090
   source "${setup_state_file}"
   [[ "${SETUP_REPOSITORY:-}" == "${repository}" ]] || die "configured REPOSITORY differs from the environment recorded in ${setup_state_file}"
   [[ "${SETUP_BASE_BRANCH:-}" == "${BASE_BRANCH}" ]] || die "configured BASE_BRANCH differs from the environment recorded in ${setup_state_file}"
   [[ -n "${SETUP_WORK_BRANCH:-}" ]] || die "invalid setup state: ${setup_state_file}"
-  if [[ -n "${configured_work_branch}" && "${configured_work_branch}" != "${SETUP_WORK_BRANCH}" ]]; then
-    die "configured WORK_BRANCH (${configured_work_branch}) differs from the active environment branch (${SETUP_WORK_BRANCH}); restore the recorded value or destroy this environment before changing branches"
-  fi
+  [[ "${SETUP_CREDENTIAL_ISOLATION_VERSION:-}" == 1 && "${SETUP_INSTANCE_ID:-}" == "${instance_id}" ]] ||
+    die "instance setup state predates credential-isolation ownership markers; refusing to reuse its branch or credential"
+  [[ "${SETUP_WORK_BRANCH}" == "${WORK_BRANCH}" ]] ||
+    die "instance branch (${SETUP_WORK_BRANCH}) does not match the isolated branch required for ${instance_id} (${WORK_BRANCH})"
   WORK_BRANCH="${SETUP_WORK_BRANCH}"
 else
   temporary_setup="$(mktemp "${setup_state_file}.tmp.XXXXXX")"
@@ -197,6 +245,8 @@ else
     printf 'SETUP_REPOSITORY=%q\n' "${repository}"
     printf 'SETUP_BASE_BRANCH=%q\n' "${BASE_BRANCH}"
     printf 'SETUP_WORK_BRANCH=%q\n' "${WORK_BRANCH}"
+    printf 'SETUP_INSTANCE_ID=%q\n' "${instance_id}"
+    printf 'SETUP_CREDENTIAL_ISOLATION_VERSION=1\n'
   } >"${temporary_setup}"
   mv "${temporary_setup}" "${setup_state_file}"
 fi
@@ -217,7 +267,7 @@ for attempt in {1..60}; do
     [[ -z "${droplet_json}" ]] || printf '%s\n' "${droplet_json}" >&2
     http_status="$(doctl_http_status <<<"${droplet_json}")"
     if [[ "${http_status}" =~ ^4[0-9]{2}$ && "${http_status}" != 408 && "${http_status}" != 429 ]]; then
-      die "DigitalOcean rejected the lookup for Droplet ${droplet_id}; fix the non-transient API error shown above or run ./destroy.sh"
+      die "DigitalOcean rejected the lookup for Droplet ${droplet_id}; fix the non-transient API error shown above or run ${destroy_command}"
     fi
     log "DigitalOcean IP lookup failed transiently (attempt ${attempt}/60); retrying"
   fi
@@ -261,7 +311,7 @@ done
 log "waiting for cloud-init (this installs Docker, Node.js, GitHub CLI, and Codex)"
 remote_ssh 'cloud-init status --wait >/dev/null && test -f /opt/codex-worker-ready'
 remote_ssh 'id -nG | tr " " "\n" | grep -Fxq docker && docker info >/dev/null' ||
-  die "agent does not have working Docker access; this Droplet may predate Docker-enabled provisioning. Recreate it with ./destroy.sh followed by ./create.sh, or use the DigitalOcean root console to run: usermod -aG docker agent"
+  die "agent does not have working Docker access; this Droplet may predate Docker-enabled provisioning. Recreate it with ${destroy_command} followed by ${create_command}, or use the DigitalOcean root console to run: usermod -aG docker agent"
 
 token_state_file="${VPS_STATE_FILE}.github-token"
 replacement_journal_file="${token_state_file}.replacement"
@@ -286,16 +336,11 @@ fi
 token_url="https://github.com/settings/personal-access-tokens/new?name=$(printf '%s' "Codex VPS ${DROPLET_ID}" | jq -sRr @uri)&description=$(printf '%s' "Temporary autonomous worker for ${repository}" | jq -sRr @uri)&target_name=$(printf '%s' "${repository%%/*}" | jq -sRr @uri)&expires_in=2&contents=write&pull_requests=write&actions=read&statuses=read"
 
 read_new_github_token() {
-  if [[ -n "${GITHUB_TOKEN_FILE:-}" ]]; then
-    [[ -f "${GITHUB_TOKEN_FILE}" ]] || die "GITHUB_TOKEN_FILE does not exist: ${GITHUB_TOKEN_FILE}"
-    new_github_token="$(tr -d '\r\n' <"${GITHUB_TOKEN_FILE}")"
-  else
-    printf '\nCreate a dedicated fine-grained personal access token for this VPS:\n\n  %s\n\nSelect only repository %s and confirm the requested permissions.\nThe token should expire in two days. Paste it below; input will not be echoed.\n\n' \
-      "${token_url}" "${repository}" >&2
-    [[ -t 0 ]] || die "standard input is not a terminal; set GITHUB_TOKEN_FILE to a protected file containing the VPS-specific token"
-    IFS= read -r -s -p "VPS-specific fine-grained PAT: " new_github_token
-    printf '\n' >&2
-  fi
+  printf '\nCreate a dedicated fine-grained personal access token for this VPS:\n\n  %s\n\nSelect only repository %s and confirm the requested permissions.\nThe token should expire in two days. Paste it below; input will not be echoed.\n\n' \
+    "${token_url}" "${repository}" >&2
+  [[ -t 0 ]] || die "standard input is not a terminal; GitHub token provisioning requires an interactive prompt"
+  IFS= read -r -s -p "VPS-specific fine-grained PAT: " new_github_token
+  printf '\n' >&2
   [[ "${new_github_token}" == github_pat_* ]] || die "expected a fine-grained PAT beginning with github_pat_; refusing a broader or unknown credential type"
 }
 
@@ -450,7 +495,7 @@ elif [[ -s "${token_state_file}" ]]; then
     old_github_token="${github_token}"
     log "the retained GitHub credential is expired, revoked, or no longer authorized; requesting a replacement without changing the VPS checkout"
     read_new_github_token
-    [[ "${new_github_token}" != "${old_github_token}" ]] || die "the replacement token is identical to the rejected token; update GITHUB_TOKEN_FILE or create a new token"
+    [[ "${new_github_token}" != "${old_github_token}" ]] || die "the replacement token is identical to the rejected token; create a new token"
     validate_github_token "${new_github_token}" || die "the replacement token cannot access ${repository}; verify its repository selection, approval, and expiration"
     write_replacement_journal "${old_github_token}" "${new_github_token}" || die "could not create the protected credential replacement journal; no credential was changed"
     github_token="${new_github_token}"
@@ -590,6 +635,6 @@ pair_json="$(remote_ssh "${remote_codex} remote-control --json pair")"
 pairing_code="$(jq -er '.manualPairingCode' <<<"${pair_json}")"
 expires_at="$(jq -r '.expiresAt // "unknown"' <<<"${pair_json}")"
 
-printf '\nCodex VPS ready\n  Droplet: %s\n  IP: %s\n  SSH host: %s\n  checkout: %s\n  branch: %s\n  GitHub actor: %s\n  remote-control server: %s\n  pairing code: %s\n  code expires at: %s (Unix time)\n\nConnect with:\n  ssh -F %q %q\n\nApprove the pairing code from the Codex/ChatGPT client.\nThe daemon survives SSH logout but not a VPS reboot; rerun ./create.sh to restart and pair it.\n\nDestroy this billable environment with:\n  ./destroy.sh\n' \
-  "${DROPLET_ID}" "${DROPLET_IP}" "${SSH_ALIAS}" "${checkout_dir}" "${WORK_BRANCH}" "${github_actor}" \
-  "${server_name}" "${pairing_code}" "${expires_at}" "${SSH_CONFIG_FILE}" "${SSH_ALIAS}"
+printf '\nCodex VPS ready\n  Instance: %s\n  Droplet: %s\n  IP: %s\n  SSH host: %s\n  checkout: %s\n  branch: %s\n  GitHub actor: %s\n  remote-control server: %s\n  pairing code: %s\n  code expires at: %s (Unix time)\n\nConnect with:\n  ssh -F %q %q\n\nApprove the pairing code from the Codex/ChatGPT client.\nThe daemon survives SSH logout but not a VPS reboot; rerun %s to restart and pair it.\n\nDestroy this billable environment with:\n  %s\n' \
+  "${VPS_INSTANCE_ID}" "${DROPLET_ID}" "${DROPLET_IP}" "${SSH_ALIAS}" "${checkout_dir}" "${WORK_BRANCH}" "${github_actor}" \
+  "${server_name}" "${pairing_code}" "${expires_at}" "${SSH_CONFIG_FILE}" "${SSH_ALIAS}" "${create_command}" "${destroy_command}"
