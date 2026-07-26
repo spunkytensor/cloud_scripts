@@ -128,13 +128,15 @@ Remote control requires Codex CLI 0.143.0 or newer. The VPS login must use the s
 
 The daemon survives SSH logout but not a VPS reboot. Rerun `./vps_create.sh --instance <instance-id> OWNER/REPOSITORY,BASE_BRANCH` after reboot to restart it and obtain a new pairing code.
 
-`vps_create.sh` writes a concrete OpenSSH host entry in the selected instance's state directory. Use it directly:
+Open an interactive shell using the instance ID or name:
 
 ```bash
-instance="worker-20260726-120000-12345-6789"
-source ".state/instances/${instance}/current.env"
-ssh -F "$SSH_CONFIG_FILE" "$SSH_ALIAS"
+./vps_shell.sh worker-20260726-120000-12345-6789
 ```
+
+`vps_shell.sh` reads the concrete OpenSSH config path and host alias generated
+for that exact instance, then runs the equivalent of
+`ssh -F "$SSH_CONFIG_FILE" "$SSH_ALIAS"`.
 
 To let the Codex desktop app discover the host, add this line to `~/.ssh/config` using the absolute generated path:
 
@@ -173,6 +175,12 @@ List locally known instances at any time:
 
 ```bash
 ./vps_list.sh
+```
+
+Open a shell on one instance:
+
+```bash
+./vps_shell.sh frontend-a
 ```
 
 Resume one instance after interruption or reboot:
