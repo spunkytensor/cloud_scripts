@@ -6,11 +6,11 @@ The remote Codex process operates directly on the VPS checkout. The local script
 
 ## Security and cost model
 
-- A Droplet is billable until `03-destroy.sh` successfully deletes it. Powering it off is not enough.
+- A Droplet is billable until `destroy.sh` successfully deletes it. Powering it off is not enough.
 - Remote control performs a separate ChatGPT device login on the VPS and never copies the local Codex credential.
 - A persistent remote-control workspace uses a dedicated fine-grained PAT restricted to the configured repository. The VPS keeps that credential so its agent can run both Git and `gh` operations without the host. The provisioning host retains a mode-`0600` copy only so teardown can revoke it if the VPS is unreachable.
 - The Codex process necessarily has access to the VPS's ChatGPT and GitHub credentials. Repository code running as `agent` could attempt to read or exfiltrate them, so use this workflow only with repositories you trust.
-- The remote agent receives outbound network access. Docker is installed, but the agent is deliberately not in the root-equivalent `docker` group. It does not receive DigitalOcean credentials.
+- The remote agent receives outbound network access and root-equivalent Docker socket access so it can run local development infrastructure such as Supabase. Repository code can therefore control the VPS through Docker; use only trusted repositories and dependencies. The agent does not receive DigitalOcean credentials.
 - Cloud-init authorizes the configured shared SSH key for `agent` and disables root SSH login. All post-provisioning SSH operations run directly as the unprivileged `agent` user.
 - Never provision the token returned by the host's `gh auth token` as the persistent VPS credential. Create a dedicated fine-grained PAT restricted to one repository, with a two-day expiration and only the required permissions.
 - SSH bootstrap uses trust on first use (`StrictHostKeyChecking=accept-new`) with a dedicated known-hosts file. This is convenient for an ephemeral worker but does not protect the first connection from an active network attacker. Use an SSH host CA or another independently verified host key before using this pattern in a hostile network.
@@ -65,23 +65,58 @@ At minimum, set:
 - `SSH_PRIVATE_KEY_FILE` to the corresponding private key on the local control machine
 - `REPOSITORY`
 - `BASE_BRANCH`
-- `WORK_BRANCH`
 
 `REPOSITORY` can be `owner/repository` or a GitHub URL.
+Leave `WORK_BRANCH` blank to generate a unique branch when the environment is first created; that concrete branch is persisted across every resume. Alternatively, set a fixed branch explicitly. Changing an explicit `WORK_BRANCH` while its environment exists fails loudly instead of continuing work on the previously recorded branch.
 
-For persistent remote-control work, GitHub requires a one-time interactive confirmation to create the fine-grained PAT; neither the REST API nor `gh` can create it unattended. `02-provision-github-workspace.sh` prints a pre-filled creation URL and securely prompts for the result. As an alternative, set `GITHUB_TOKEN_FILE` to a protected local file containing the dedicated token. Do not put the token itself in `config.env`.
+GitHub requires a one-time interactive confirmation to create the fine-grained PAT; neither the REST API nor `gh` can create it unattended. `create.sh` prints a pre-filled creation URL and securely prompts for the result. As an alternative, set `GITHUB_TOKEN_FILE` to a protected local file containing the dedicated token. Do not put the token itself in `config.env`.
 
 ## Run the lifecycle
 
-### 1. Allocate and bootstrap the VPS
+### Create or resume the environment
 
 ```bash
-./01-allocate.sh
+./create.sh
 ```
 
-The script records the Droplet ID, IP, and a dedicated SSH known-hosts file under `.state/`. If provisioning fails after DigitalOcean creates the machine, this state remains available for cleanup.
+The script:
 
-It also writes a concrete OpenSSH host entry to `.state/current.env.ssh_config`. Use it directly:
+1. Allocates the Droplet, or resumes the Droplet recorded in `.state/`.
+2. Waits for its public IP, SSH, and cloud-init.
+3. Creates or verifies the VPS-specific GitHub credential.
+4. Clones `REPOSITORY` into `/home/agent/projects` and ensures `WORK_BRANCH` exists.
+5. Starts a TTY-backed ChatGPT device login when needed.
+6. Starts Codex remote control and prints a fresh pairing code.
+
+If setup is interrupted after allocation, the Droplet remains allocated and may be billable. Rerun `./create.sh`; it verifies and resumes the existing token, checkout, login, and daemon instead of allocating another machine. If the retained two-day token expired, `create.sh` asks for and validates a replacement, confirms the old remote copy before replacing it, and preserves the checkout and work branch. A protected replacement journal records both credential values until the old one is revoked, so either resume or teardown can safely reconcile an interruption. Use `./destroy.sh` to abandon the setup.
+
+The GitHub prompt creates a fine-grained PAT. Verify that it:
+
+- Targets only `REPOSITORY`.
+- Expires in two days.
+- Grants `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`.
+- Has any organization-required approval.
+
+The VPS then stands on its own. Both interactive SSH shells and the Codex-controlled environment can use ordinary commands such as:
+
+```bash
+cd /home/agent/projects/your-repository
+git fetch
+git push -u origin "$WORK_BRANCH"
+gh pr create
+gh run list
+gh run watch
+```
+
+The `agent` user can also run Docker directly, including the containers started by the Supabase CLI. This is intentionally root-equivalent access inside the disposable VPS; no `sudo`, password, `newgrp`, or manual socket permission change is needed on a newly provisioned environment.
+
+Repository code running as `agent` can necessarily read this credential. Keep default-branch protection enabled and do not grant the token ruleset-bypass or repository-administration permissions. Fine-grained PATs do not support every GitHub API, including some Checks API operations; use `gh run` for Actions monitoring and test any additional required `gh` commands before relying on them unattended.
+
+Remote control requires Codex CLI 0.143.0 or newer. The VPS login must use the same ChatGPT account and workspace as the controlling client. API-key and access-token logins are rejected because they do not enroll the host for direct remote control. No inbound app-server port is opened; the daemon uses the Codex secure relay.
+
+The daemon survives SSH logout but not a VPS reboot. Rerun `./create.sh` after reboot to restart it and obtain a new pairing code.
+
+`create.sh` writes a concrete OpenSSH host entry to `.state/current.env.ssh_config`. Use it directly:
 
 ```bash
 source .state/current.env
@@ -96,74 +131,27 @@ Include /absolute/path/to/vps-codex/.state/current.env.ssh_config
 
 Remote root login is disabled.
 
-### 2A. Provision a standalone GitHub workspace
-
-```bash
-./02-provision-github-workspace.sh
-```
-
-The script prints a pre-filled GitHub fine-grained PAT creation URL. In GitHub, verify that the token:
-
-- Targets only `REPOSITORY`.
-- Expires in two days.
-- Grants `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`.
-- Has any organization-required approval.
-
-After you paste the token into the hidden prompt, the script validates repository access, stores protected copies on the host and VPS, configures HTTPS Git authentication, clones into `/home/agent/projects`, configures repository-local commit identity, and creates `WORK_BRANCH`. The token never appears in the Git remote URL or `config.env`.
-
-The VPS then stands on its own. Both interactive SSH shells and the Codex-controlled environment can use ordinary commands such as:
-
-```bash
-cd /home/agent/projects/your-repository
-git fetch
-git push -u origin "$WORK_BRANCH"
-gh pr create
-gh run list
-gh run watch
-```
-
-Repository code running as `agent` can necessarily read this credential. Keep default-branch protection enabled and do not grant the token ruleset-bypass or repository-administration permissions. Fine-grained PATs do not support every GitHub API, including some Checks API operations; use `gh run` for Actions monitoring and test any additional required `gh` commands before relying on them unattended.
-
-### 2B. Enable persistent headless remote control
-
-Remote control requires Codex CLI 0.143.0 or newer. Allocation verifies that minimum version. Then run:
-
-```bash
-./02-enable-remote-control.sh
-```
-
-The script:
-
-1. Verifies the remote Codex version.
-2. Starts a headless ChatGPT device-login flow if the VPS is not logged in. Open the displayed URL on an authorized device and enter its code.
-3. Starts the detached Codex remote-control daemon.
-4. Prints a short-lived manual pairing code for the Codex/ChatGPT client.
-
-The VPS login must use the same ChatGPT account and workspace as the controlling client. API-key and access-token logins are rejected because they do not enroll the host for direct remote control. No inbound app-server port is opened; the daemon uses the Codex secure relay.
-
-The daemon survives SSH logout, but not a VPS reboot. Rerun `02-enable-remote-control.sh` after reboot to restart it and obtain a new pairing code.
-
-Workspace provisioning and remote-control enrollment are intentionally compatible: the agent needs both the VPS-specific GitHub credential and its ChatGPT login. Run workspace provisioning before pairing if you want the agent to begin with the checkout, or run it afterward without reenrolling remote control.
-
 Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be attached to as live remote-control sessions. Start new work through the paired client.
 
-### 3. Stop remote control and destroy the VPS
+### Destroy the environment
 
 ```bash
-./03-destroy.sh
+./destroy.sh
 ```
 
-Run this when development is complete, including after a provisioning or remote-control failure. It attempts to stop the remote-control daemon, deletes the Droplet rather than merely powering it off, and then revokes the retained fine-grained PAT through GitHub's credential revocation API. Revocation uses the host copy and therefore works even if SSH is unavailable. If Droplet deletion is not confirmed, the script leaves the PAT active and retains both Droplet and token state for a safe retry. If deletion succeeds but GitHub revocation fails, the protected token is retained and rerunning `03-destroy.sh` retries only revocation. Remove the environment from the controlling client if it remains listed after destruction.
+Run this when development is complete, including after a setup failure. It attempts to stop the remote-control daemon, deletes the Droplet rather than merely powering it off, and then revokes the retained fine-grained PAT through GitHub's credential revocation API. Revocation uses the host copy and therefore works even if SSH is unavailable. If an unknown deletion failure occurs, it leaves the PAT active and retains both Droplet and token state for a safe retry. If deletion succeeds but GitHub revocation fails, the protected token is retained and rerunning `destroy.sh` retries only revocation. After independently revoking the token or explicitly accepting its remaining expiration window, escape an unrecoverable revocation failure with `./destroy.sh --forget-unrevoked-token`. Remove the environment from the controlling client if it remains listed after destruction.
+
+A DigitalOcean 404 may mean either that the Droplet was deleted elsewhere or that `doctl` is authenticated to a different account. To avoid leaving repository authority live after out-of-band deletion, teardown revokes the PAT on 404 but retains the Droplet state. After verifying the account and confirming the Droplet is absent, run `./destroy.sh --confirm-missing-droplet` to remove the retained local state.
+
+If allocation was interrupted before DigitalOcean returned an ID, both scripts reconcile it through a unique lifecycle tag. A zero-match lookup is treated as temporarily uncertain and retains its checkpoint. Only after independently confirming that no tagged Droplet exists should you clear it with `./destroy.sh --forget-unresolved-allocation`.
 
 ## Multiple concurrent workers
 
 Give each process a distinct configuration and state file, and ensure every worker has a unique Droplet and Git branch:
 
 ```bash
-VPS_CODEX_CONFIG="$PWD/config-api.env" ./01-allocate.sh
-VPS_CODEX_CONFIG="$PWD/config-api.env" ./02-provision-github-workspace.sh
-VPS_CODEX_CONFIG="$PWD/config-api.env" ./02-enable-remote-control.sh
-VPS_CODEX_CONFIG="$PWD/config-api.env" ./03-destroy.sh
+VPS_CODEX_CONFIG="$PWD/config-api.env" ./create.sh
+VPS_CODEX_CONFIG="$PWD/config-api.env" ./destroy.sh
 ```
 
 Each config should set a distinct `VPS_STATE_FILE`, `DROPLET_NAME`, and `WORK_BRANCH`.

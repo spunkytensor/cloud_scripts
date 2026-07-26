@@ -91,6 +91,7 @@ write_files:
 
       systemctl restart ssh
       systemctl enable --now docker
+      usermod -aG docker agent
 
       node_setup="$(mktemp)"
       codex_setup="$(mktemp)"
@@ -112,6 +113,7 @@ write_files:
         /home/agent/.config/vps-codex
 
       command -v docker >/dev/null
+      runuser -u agent -- docker info >/dev/null
       command -v node >/dev/null
       test -x /usr/bin/gh
       test -x /usr/local/bin/gh
