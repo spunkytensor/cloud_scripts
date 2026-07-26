@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly DOCTL_VERSION="1.164.0"
+readonly RUST_VERSION="1.96.1"
 readonly -a REQUIRED_PACKAGES=(
   ca-certificates
   curl
@@ -60,5 +61,23 @@ if ! command -v doctl >/dev/null 2>&1 ||
 else
   printf 'doctl %s is already installed.\n' "${DOCTL_VERSION}"
 fi
+
+if [[ ! -x "${HOME}/.cargo/bin/rustup" ]]; then
+  printf 'Installing rustup.\n'
+  rustup_install="$(mktemp)"
+  trap 'rm -f "${rustup_install}"' EXIT
+  curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    --output "${rustup_install}" https://sh.rustup.rs
+  sh "${rustup_install}" -y --profile minimal --default-toolchain none
+  rm -f "${rustup_install}"
+  trap - EXIT
+fi
+
+"${HOME}/.cargo/bin/rustup" toolchain install "${RUST_VERSION}" \
+  --profile minimal --component rustfmt,clippy
+mkdir -p "${HOME}/.local/bin"
+for rust_tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do
+  ln -sfn "${HOME}/.cargo/bin/${rust_tool}" "${HOME}/.local/bin/${rust_tool}"
+done
 
 printf 'Orb setup complete. Copy config.example.env to config.env only when operator credentials are available.\n'

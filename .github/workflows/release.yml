@@ -1,0 +1,177 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing package version for a non-publishing dry run
+        required: true
+
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.96.1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy && rustup default "$RUST_TOOLCHAIN"
+      - id: version
+        shell: bash
+        env:
+          DRY_VERSION: ${{ inputs.version }}
+        run: |
+          package=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "vps") | .version')
+          requested=${GITHUB_REF_NAME#v}
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] && requested=$DRY_VERSION
+          [[ "$requested" == "$package" && "$package" != *-* ]] || { echo 'tag/input must equal a non-prerelease Cargo package version' >&2; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || git verify-tag "$GITHUB_REF_NAME"
+          [[ "$(cargo run --locked -- --version)" == *"$package"* ]] || { echo 'CLI version mismatch' >&2; exit 1; }
+          echo "version=$package" >>"$GITHUB_OUTPUT"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
+      - run: source packaging/tools.env && cargo install cargo-deny --version "=${CARGO_DENY_VERSION}" --locked
+      - run: cargo deny --all-features check
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            kind: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            kind: tar
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            kind: zip
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            kind: deb
+            deb_arch: amd64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            kind: deb
+            deb_arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install exact toolchain and target
+        shell: bash
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target '${{ matrix.target }}' && rustup default "$RUST_TOOLCHAIN"
+      - name: Build locked release
+        run: cargo build --workspace --all-features --locked --release --target ${{ matrix.target }}
+      - name: Generate third-party notice
+        shell: bash
+        run: |
+          source packaging/tools.env
+          cargo install cargo-about --version "=${CARGO_ABOUT_VERSION}" --locked
+          cargo about generate --config packaging/about.toml packaging/about.hbs > target/THIRD_PARTY_LICENSES.txt
+      - name: Stage Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash packaging/stage-unix.sh '${{ matrix.target }}' '${{ needs.verify.outputs.version }}' 'target/stage'
+      - name: Stage Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: packaging/stage-windows.ps1 -Target '${{ matrix.target }}' -Destination 'target/stage'
+      - name: Build Debian package
+        if: matrix.kind == 'deb'
+        shell: bash
+        run: bash packaging/build-deb.sh target/stage '${{ needs.verify.outputs.version }}' '${{ matrix.deb_arch }}' "target/vps_${{ needs.verify.outputs.version }}_${{ matrix.deb_arch }}.deb"
+      - name: Smoke test native binary and Debian package
+        if: matrix.kind == 'deb'
+        shell: bash
+        run: |
+          target/stage/bin/vps --version
+          sudo dpkg -i target/vps_*.deb
+          vps --version
+          sudo dpkg -r vps
+      - name: Archive staged tree
+        shell: bash
+        run: |
+          cd target
+          if [[ '${{ matrix.kind }}' == tar ]]; then tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
+          if [[ '${{ matrix.kind }}' == zip ]]; then 7z a "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.zip" ./stage/*; fi
+      - name: Generate CycloneDX SBOM from final staged filesystem
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        with:
+          scan-type: fs
+          scan-ref: target/stage
+          format: cyclonedx
+          output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
+          version: v0.59.1
+      - name: Gate staged filesystem
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        with:
+          scan-type: fs
+          scan-ref: target/stage
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          version: v0.59.1
+      - name: Gate generated SBOM
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
+        with:
+          scan-type: sbom
+          scan-ref: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          version: v0.59.1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            target/*.tar.gz
+            target/*.zip
+            target/*.deb
+            target/*.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [verify, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - name: Attest all release subjects
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create '${{ github.ref_name }}' dist/* --verify-tag --generate-notes --title '${{ github.ref_name }}'
