@@ -9,6 +9,7 @@ source "${SCRIPT_DIR}/lib.sh"
 instance_id=""
 create_new_instance=false
 instance_option_seen=false
+repository_argument=""
 while (( $# > 0 )); do
   case "$1" in
     --new)
@@ -24,15 +25,50 @@ while (( $# > 0 )); do
       instance_id="$2"
       shift 2
       ;;
+    --*)
+      die "usage: ./vps_create.sh (--new | --instance INSTANCE_ID) OWNER/REPOSITORY,BASE_BRANCH"
+      ;;
     *)
-      die "usage: ./create.sh [--new | --instance INSTANCE_ID]"
+      [[ -z "${repository_argument}" ]] || die "vps_create.sh accepts exactly one repository argument"
+      repository_argument="$1"
+      shift
       ;;
   esac
 done
 [[ "${create_new_instance}" != true || "${instance_option_seen}" != true ]] || die "--new and --instance cannot be combined"
-[[ "${create_new_instance}" == true || "${instance_option_seen}" == true ]] || die "usage: ./create.sh (--new | --instance INSTANCE_ID)"
+[[ "${create_new_instance}" == true || "${instance_option_seen}" == true ]] || die "usage: ./vps_create.sh (--new | --instance INSTANCE_ID) OWNER/REPOSITORY,BASE_BRANCH"
+[[ -n "${repository_argument}" ]] || die "usage: ./vps_create.sh (--new | --instance INSTANCE_ID) OWNER/REPOSITORY,BASE_BRANCH"
 
 load_config
+[[ "${repository_argument}" == *,* && "${repository_argument#*,}" != *,* ]] ||
+  die "repository argument must be exactly OWNER/REPOSITORY,BASE_BRANCH"
+REPOSITORY="${repository_argument%%,*}"
+BASE_BRANCH="${repository_argument#*,}"
+[[ -n "${REPOSITORY}" && -n "${BASE_BRANCH}" ]] || die "repository and base branch must both be nonempty"
+[[ "${BASE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "base branch contains unsupported characters"
+
+repository="${REPOSITORY#https://github.com/}"
+repository="${repository#git@github.com:}"
+repository="${repository%.git}"
+repository="${repository%/}"
+[[ "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "repository must identify one github.com owner/repository"
+repository_owner="${repository%%/*}"
+repository_name="${repository#*/}"
+[[ "${repository_owner}" != . && "${repository_owner}" != .. &&
+  "${repository_name}" != . && "${repository_name}" != .. ]] ||
+  die "repository must identify one github.com owner/repository"
+repository_argument="${repository},${BASE_BRANCH}"
+require_command git
+git check-ref-format --branch "${BASE_BRANCH}" >/dev/null 2>&1 || die "base branch is not a valid Git branch: ${BASE_BRANCH}"
+
+new_instance_state_dir=""
+cleanup_empty_instance_reservation() {
+  local status="$1"
+  if (( status != 0 )) && [[ -n "${new_instance_state_dir}" ]] && rmdir "${new_instance_state_dir}" 2>/dev/null; then
+    log "removed empty instance reservation ${new_instance_state_dir}"
+  fi
+  return "${status}"
+}
 if [[ "${create_new_instance}" == true ]]; then
   install -d -m 0700 "$(instance_state_root)" || die "cannot create instance state directory: $(instance_state_root)"
   instance_id=""
@@ -44,16 +80,17 @@ if [[ "${create_new_instance}" == true ]]; then
     fi
   done
   [[ -n "${instance_id}" ]] || die "could not reserve a unique instance ID after 20 attempts"
+  new_instance_state_dir="$(instance_state_root)/${instance_id}"
+  trap 'cleanup_empty_instance_reservation $?' EXIT
   instance_option_seen=true
 fi
 select_instance_state "${instance_id}"
 instance_arguments=" --instance ${instance_id}"
 log "using instance ${instance_id}"
-create_command="./create.sh${instance_arguments}"
-destroy_command="./destroy.sh${instance_arguments}"
+create_command="./vps_create.sh${instance_arguments} ${repository_argument}"
+destroy_command="./vps_destroy.sh${instance_arguments}"
 
 require_command doctl
-require_command git
 require_command gh
 require_command jq
 require_command ssh
@@ -64,29 +101,32 @@ require_command ssh-keygen
 [[ -n "${SSH_PRIVATE_KEY_FILE:-}" ]] || die "SSH_PRIVATE_KEY_FILE is required in ${CONFIG_FILE}"
 [[ -f "${SSH_PRIVATE_KEY_FILE}" ]] || die "SSH private key not found: ${SSH_PRIVATE_KEY_FILE}"
 [[ -f "${SSH_PRIVATE_KEY_FILE}.pub" ]] || die "SSH public key not found: ${SSH_PRIVATE_KEY_FILE}.pub"
-[[ -n "${REPOSITORY:-}" ]] || die "REPOSITORY is required in ${CONFIG_FILE}"
-[[ -n "${BASE_BRANCH:-}" ]] || die "BASE_BRANCH is required in ${CONFIG_FILE}"
 WORK_BRANCH="codex/${instance_id}"
-[[ "${BASE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "BASE_BRANCH contains unsupported characters"
 [[ "${WORK_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "WORK_BRANCH contains unsupported characters"
 git check-ref-format --branch "${WORK_BRANCH}" >/dev/null 2>&1 || die "WORK_BRANCH is not a valid Git branch: ${WORK_BRANCH}"
 
-repository="${REPOSITORY#https://github.com/}"
-repository="${repository#git@github.com:}"
-repository="${repository%.git}"
-repository="${repository%/}"
-[[ "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "REPOSITORY must identify one github.com owner/repository"
-
 state_dir="$(dirname "${VPS_STATE_FILE}")"
 cloud_init_file=""
+created_setup_state=false
+temporary_setup=""
 
 cleanup() {
   local status=$?
   [[ -z "${cloud_init_file}" ]] || rm -f "${cloud_init_file}"
-  release_lifecycle_lock
+  if [[ -n "${temporary_setup}" ]]; then
+    rm -f "${temporary_setup}" || true
+  fi
   if (( status != 0 )) && [[ -e "${VPS_STATE_FILE}" || -e "${VPS_STATE_FILE}.allocation" ]]; then
     printf '\nSetup stopped. The Droplet remains allocated and may be billable.\nResume with:\n  %s\n\nAbandon and clean up with:\n  %s\n' "${create_command}" "${destroy_command}" >&2
   fi
+  if (( status != 0 )) && [[ "${created_setup_state}" == true &&
+    ! -e "${VPS_STATE_FILE}" && ! -e "${VPS_STATE_FILE}.allocation" &&
+    ! -e "${VPS_STATE_FILE}.github-token" && ! -e "${VPS_STATE_FILE}.github-token.replacement" &&
+    ! -e "${VPS_STATE_FILE}.remote-control" ]]; then
+    rm -f "${VPS_STATE_FILE}.setup"
+  fi
+  release_lifecycle_lock
+  cleanup_empty_instance_reservation "${status}"
   return "${status}"
 }
 trap cleanup EXIT
@@ -108,6 +148,45 @@ state_probe="$(mktemp "${VPS_STATE_FILE}.probe.XXXXXX")" || die "state directory
 rm -f "${state_probe}"
 acquire_lifecycle_lock
 
+setup_state_file="${VPS_STATE_FILE}.setup"
+if [[ -f "${setup_state_file}" ]]; then
+  unset SETUP_REPOSITORY SETUP_BASE_BRANCH SETUP_WORK_BRANCH SETUP_INSTANCE_ID SETUP_CREDENTIAL_ISOLATION_VERSION
+  # Generated below with shell-escaped values.
+  # shellcheck disable=SC1090
+  source "${setup_state_file}"
+  [[ "${SETUP_REPOSITORY:-}" == "${repository}" ]] || die "requested repository differs from the environment recorded in ${setup_state_file}"
+  [[ "${SETUP_BASE_BRANCH:-}" == "${BASE_BRANCH}" ]] || die "requested base branch differs from the environment recorded in ${setup_state_file}"
+  [[ -n "${SETUP_WORK_BRANCH:-}" ]] || die "invalid setup state: ${setup_state_file}"
+  [[ "${SETUP_CREDENTIAL_ISOLATION_VERSION:-}" == 1 && "${SETUP_INSTANCE_ID:-}" == "${instance_id}" ]] ||
+    die "instance setup state predates credential-isolation ownership markers; refusing to reuse its branch or credential"
+  [[ "${SETUP_WORK_BRANCH}" == "${WORK_BRANCH}" ]] ||
+    die "instance branch (${SETUP_WORK_BRANCH}) does not match the isolated branch required for ${instance_id} (${WORK_BRANCH})"
+  WORK_BRANCH="${SETUP_WORK_BRANCH}"
+else
+  for existing_lifecycle_state in \
+    "${VPS_STATE_FILE}" \
+    "${VPS_STATE_FILE}.allocation" \
+    "${VPS_STATE_FILE}.github-token" \
+    "${VPS_STATE_FILE}.github-token.replacement" \
+    "${VPS_STATE_FILE}.remote-control"; do
+    [[ ! -e "${existing_lifecycle_state}" ]] ||
+      die "instance lifecycle state exists without its repository identity at ${setup_state_file}; refusing to adopt a new repository; run ${destroy_command}"
+  done
+
+  temporary_setup="$(mktemp "${setup_state_file}.tmp.XXXXXX")"
+  chmod 0600 "${temporary_setup}"
+  {
+    printf 'SETUP_REPOSITORY=%q\n' "${repository}"
+    printf 'SETUP_BASE_BRANCH=%q\n' "${BASE_BRANCH}"
+    printf 'SETUP_WORK_BRANCH=%q\n' "${WORK_BRANCH}"
+    printf 'SETUP_INSTANCE_ID=%q\n' "${instance_id}"
+    printf 'SETUP_CREDENTIAL_ISOLATION_VERSION=1\n'
+  } >"${temporary_setup}"
+  mv "${temporary_setup}" "${setup_state_file}"
+  temporary_setup=""
+  created_setup_state=true
+fi
+
 if [[ -e "${VPS_STATE_FILE}" ]]; then
   load_state
   droplet_id="${DROPLET_ID}"
@@ -117,7 +196,6 @@ else
   for orphaned_state in \
     "${VPS_STATE_FILE}.github-token" \
     "${VPS_STATE_FILE}.github-token.replacement" \
-    "${VPS_STATE_FILE}.setup" \
     "${VPS_STATE_FILE}.remote-control"; do
     [[ ! -e "${orphaned_state}" ]] || die "orphaned lifecycle state exists at ${orphaned_state}; run ${destroy_command} before creating another Droplet"
   done
@@ -222,33 +300,6 @@ else
     rm -f "${allocation_state_file}"
     log "DigitalOcean accepted the request as Droplet ${droplet_id}; cleanup state saved to ${VPS_STATE_FILE}"
   fi
-fi
-
-setup_state_file="${VPS_STATE_FILE}.setup"
-if [[ -f "${setup_state_file}" ]]; then
-  unset SETUP_REPOSITORY SETUP_BASE_BRANCH SETUP_WORK_BRANCH SETUP_INSTANCE_ID SETUP_CREDENTIAL_ISOLATION_VERSION
-  # Generated below with shell-escaped values.
-  # shellcheck disable=SC1090
-  source "${setup_state_file}"
-  [[ "${SETUP_REPOSITORY:-}" == "${repository}" ]] || die "configured REPOSITORY differs from the environment recorded in ${setup_state_file}"
-  [[ "${SETUP_BASE_BRANCH:-}" == "${BASE_BRANCH}" ]] || die "configured BASE_BRANCH differs from the environment recorded in ${setup_state_file}"
-  [[ -n "${SETUP_WORK_BRANCH:-}" ]] || die "invalid setup state: ${setup_state_file}"
-  [[ "${SETUP_CREDENTIAL_ISOLATION_VERSION:-}" == 1 && "${SETUP_INSTANCE_ID:-}" == "${instance_id}" ]] ||
-    die "instance setup state predates credential-isolation ownership markers; refusing to reuse its branch or credential"
-  [[ "${SETUP_WORK_BRANCH}" == "${WORK_BRANCH}" ]] ||
-    die "instance branch (${SETUP_WORK_BRANCH}) does not match the isolated branch required for ${instance_id} (${WORK_BRANCH})"
-  WORK_BRANCH="${SETUP_WORK_BRANCH}"
-else
-  temporary_setup="$(mktemp "${setup_state_file}.tmp.XXXXXX")"
-  chmod 0600 "${temporary_setup}"
-  {
-    printf 'SETUP_REPOSITORY=%q\n' "${repository}"
-    printf 'SETUP_BASE_BRANCH=%q\n' "${BASE_BRANCH}"
-    printf 'SETUP_WORK_BRANCH=%q\n' "${WORK_BRANCH}"
-    printf 'SETUP_INSTANCE_ID=%q\n' "${instance_id}"
-    printf 'SETUP_CREDENTIAL_ISOLATION_VERSION=1\n'
-  } >"${temporary_setup}"
-  mv "${temporary_setup}" "${setup_state_file}"
 fi
 
 log "waiting for DigitalOcean to report Droplet ${droplet_id} and its public IP"
@@ -481,7 +532,7 @@ if [[ -f "${replacement_journal_file}" ]]; then
   if revoke_superseded_token "${REPLACEMENT_OLD_GITHUB_TOKEN}"; then
     rm -f "${replacement_journal_file}"
   else
-    log "retaining the replacement journal so destroy.sh can retry revocation of both known credentials"
+    log "retaining the replacement journal so vps_destroy.sh can retry revocation of both known credentials"
   fi
   unset retained_host_token remote_replacement_state github_token
   unset REPLACEMENT_OLD_GITHUB_TOKEN REPLACEMENT_NEW_GITHUB_TOKEN
@@ -504,7 +555,7 @@ elif [[ -s "${token_state_file}" ]]; then
     if revoke_superseded_token "${old_github_token}"; then
       rm -f "${replacement_journal_file}"
     else
-      log "retaining the replacement journal so destroy.sh can retry revocation of both known credentials"
+      log "retaining the replacement journal so vps_destroy.sh can retry revocation of both known credentials"
     fi
     unset old_github_token new_github_token
     log "installed the replacement GitHub credential; the existing checkout and work branch were preserved"

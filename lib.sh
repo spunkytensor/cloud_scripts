@@ -106,13 +106,21 @@ release_lifecycle_lock() {
 }
 
 load_config() {
+  local allow_legacy_source_settings="${1:-false}"
+  local legacy_source_settings=false
+
   [[ -f "${CONFIG_FILE}" ]] || die "missing ${CONFIG_FILE}; copy config.example.env to config.env and edit it"
-  unset DROPLET_NAME GITHUB_TOKEN_FILE VPS_INSTANCE_ID VPS_INSTANCE_STATE_DIR VPS_STATE_FILE WORK_BRANCH
+  unset BASE_BRANCH DROPLET_NAME GITHUB_TOKEN_FILE REPOSITORY VPS_INSTANCE_ID VPS_INSTANCE_STATE_DIR VPS_STATE_FILE WORK_BRANCH
   # This is a user-owned shell configuration file and may intentionally use
   # expansions such as $(date ...) for unique resource names.
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
 
+  [[ ! "${BASE_BRANCH+x}" && ! "${REPOSITORY+x}" ]] || legacy_source_settings=true
+  unset BASE_BRANCH REPOSITORY
+  if [[ "${allow_legacy_source_settings}" != true && "${legacy_source_settings}" == true ]]; then
+    die "obsolete setting found in ${CONFIG_FILE}; remove BASE_BRANCH and REPOSITORY; pass OWNER/REPOSITORY,BASE_BRANCH to vps_create.sh"
+  fi
   [[ ! "${DROPLET_NAME+x}" && ! "${GITHUB_TOKEN_FILE+x}" && ! "${VPS_STATE_FILE+x}" && ! "${WORK_BRANCH+x}" ]] ||
     die "obsolete per-instance setting found in ${CONFIG_FILE}; remove DROPLET_NAME, GITHUB_TOKEN_FILE, VPS_STATE_FILE, and WORK_BRANCH"
   VPS_INSTANCE_STATE_DIR="${VPS_INSTANCE_STATE_DIR:-${VPS_CODEX_DIR}/.state/instances}"

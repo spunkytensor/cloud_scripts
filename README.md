@@ -8,17 +8,17 @@ The remote Codex process operates directly on the VPS checkout. The local script
 
 This repository exists to move agent-driven development off the developer's laptop and onto disposable machines, one machine per unit of work.
 
-**Keep the agent off the developer machine.** A coding agent that can run arbitrary commands, install dependencies, and execute repository code is a poor fit for a laptop that also holds personal credentials, SSH keys, cloud logins, and unrelated client work. Each worker here is a separate VPS with only what the job needs: a checkout of one repository and a GitHub credential scoped to that same repository. The agent gets outbound network access and root-equivalent Docker access inside that VPS, and none of it touches the laptop. When the work is done, `destroy.sh` deletes the machine and revokes the credential, so a compromised or misbehaving agent loses everything it had rather than persisting on a long-lived host. The laptop keeps only the control plane and the DigitalOcean credential, which is never copied to the VPS.
+**Keep the agent off the developer machine.** A coding agent that can run arbitrary commands, install dependencies, and execute repository code is a poor fit for a laptop that also holds personal credentials, SSH keys, cloud logins, and unrelated client work. Each worker here is a separate VPS with only what the job needs: a checkout of one repository and a GitHub credential scoped to that same repository. The agent gets outbound network access and root-equivalent Docker access inside that VPS, and none of it touches the laptop. When the work is done, `vps_destroy.sh` deletes the machine and revokes the credential, so a compromised or misbehaving agent loses everything it had rather than persisting on a long-lived host. The laptop keeps only the control plane and the DigitalOcean credential, which is never copied to the VPS.
 
-**Run work in parallel instead of in series.** A single developer machine forces agents to take turns: one checkout, one set of ports, one dependency tree, one running stack. Because each worker here is an independent machine, several agents can work at once — separate features, separate branches, competing approaches to the same problem, or a long-running migration alongside ordinary development. `create.sh --new` allocates another one, `list.sh` shows what is running, and each instance keeps its own Droplet, work branch, credential, and SSH configuration under `.state/instances/<instance-id>/`. Throughput is limited by what you are willing to pay for and supervise, not by the one machine in front of you.
+**Run work in parallel instead of in series.** A single developer machine forces agents to take turns: one checkout, one set of ports, one dependency tree, one running stack. Because each worker here is an independent machine, several agents can work at once — separate features, separate repositories, competing approaches to the same problem, or a long-running migration alongside ordinary development. `vps_create.sh --new OWNER/REPOSITORY,BASE_BRANCH` allocates another one, `vps_list.sh` shows what is running, and each instance keeps its own Droplet, repository source, work branch, credential, and SSH configuration under `.state/instances/<instance-id>/`. Throughput is limited by what you are willing to pay for and supervise, not by the one machine in front of you.
 
 **Give every copy its own operating system.** Parallel work on a shared host means contending for the same ports, the same Docker daemon, the same database sockets, the same global toolchain versions, and the same filesystem paths — and it means one agent's broken state can break another's. Full-machine isolation removes that entire category of problem. Each worker boots its own Ubuntu instance, so every copy of the stack can bind the same conventional ports, run its own Supabase containers and databases, and install whatever system packages it needs without coordination. It also makes the environment genuinely reproducible: cloud-init builds each machine identically from scratch, so a worker reflects the repository's real requirements rather than a laptop's accumulated local configuration. Damage is contained to one disposable machine, and recovering means destroying it and creating another.
 
 ## Security and cost model
 
-- A Droplet is billable until `destroy.sh` successfully deletes it. Powering it off is not enough.
+- A Droplet is billable until `vps_destroy.sh` successfully deletes it. Powering it off is not enough.
 - Remote control performs a separate ChatGPT device login on the VPS and never copies the local Codex credential.
-- A persistent remote-control workspace uses a dedicated fine-grained PAT restricted to the configured repository. The VPS keeps that credential so its agent can run both Git and `gh` operations without the host. The provisioning host retains a mode-`0600` copy only so teardown can revoke it if the VPS is unreachable.
+- A persistent remote-control workspace uses a dedicated fine-grained PAT restricted to the repository selected for that instance. The VPS keeps that credential so its agent can run both Git and `gh` operations without the host. The provisioning host retains a mode-`0600` copy only so teardown can revoke it if the VPS is unreachable.
 - The Codex process necessarily has access to the VPS's ChatGPT and GitHub credentials. Repository code running as `agent` could attempt to read or exfiltrate them, so use this workflow only with repositories you trust.
 - The remote agent receives outbound network access and root-equivalent Docker socket access so it can run local development infrastructure such as Supabase. Repository code can therefore control the VPS through Docker; use only trusted repositories and dependencies. The agent does not receive DigitalOcean credentials.
 - Cloud-init authorizes the configured shared SSH key for `agent` and disables root SSH login. All post-provisioning SSH operations run directly as the unprivileged `agent` user.
@@ -73,22 +73,22 @@ At minimum, set:
 
 - `DO_SSH_KEY`
 - `SSH_PRIVATE_KEY_FILE` to the corresponding private key on the local control machine
-- `REPOSITORY`
-- `BASE_BRANCH`
 
-`REPOSITORY` can be `owner/repository` or a GitHub URL.
-Each instance automatically uses branch `codex/<instance-id>`; branch selection is not configurable.
+The repository and base branch are not profile settings. Pass them together to
+`vps_create.sh` as `OWNER/REPOSITORY,BASE_BRANCH`; GitHub HTTPS and SSH repository
+URLs are also accepted. Each instance persists that source and automatically
+uses branch `codex/<instance-id>`; the work branch is not configurable.
 
-Remove obsolete `WORK_BRANCH`, `GITHUB_TOKEN_FILE`, `VPS_STATE_FILE`, and `DROPLET_NAME` entries from older configurations. The scripts reject those settings rather than silently reintroducing shared or unscoped state. Use `DROPLET_NAME_PREFIX` and `VPS_INSTANCE_STATE_DIR` only when overriding their defaults.
+Remove obsolete `REPOSITORY`, `BASE_BRANCH`, `WORK_BRANCH`, `GITHUB_TOKEN_FILE`, `VPS_STATE_FILE`, and `DROPLET_NAME` entries from older configurations. `vps_create.sh` rejects legacy repository settings rather than allowing them to compete with its command-line source; `vps_list.sh` and `vps_destroy.sh` ignore those two settings so an old config cannot block inspection or teardown. All scripts reject the obsolete per-instance path and branch settings. Use `DROPLET_NAME_PREFIX` and `VPS_INSTANCE_STATE_DIR` only when overriding their defaults.
 
-GitHub requires a one-time interactive confirmation to create each instance's fine-grained PAT; neither the REST API nor `gh` can create it unattended. `create.sh` prints a pre-filled creation URL and securely prompts for the result. Tokens cannot be supplied through `config.env`, ensuring teardown can revoke one instance without affecting another.
+GitHub requires a one-time interactive confirmation to create each instance's fine-grained PAT; neither the REST API nor `gh` can create it unattended. `vps_create.sh` prints a pre-filled creation URL and securely prompts for the result. Tokens cannot be supplied through `config.env`, ensuring teardown can revoke one instance without affecting another.
 
 ## Run the lifecycle
 
 ### Create or resume the environment
 
 ```bash
-./create.sh --new
+./vps_create.sh --new mattcurf/testrepo,main
 ```
 
 The script:
@@ -96,15 +96,15 @@ The script:
 1. Allocates the Droplet, or resumes the Droplet recorded in `.state/`.
 2. Waits for its public IP, SSH, and cloud-init.
 3. Creates or verifies the VPS-specific GitHub credential.
-4. Clones `REPOSITORY` into `/home/agent/projects` and ensures branch `codex/<instance-id>` exists.
+4. Clones the requested repository into `/home/agent/projects` and ensures branch `codex/<instance-id>` exists.
 5. Starts a TTY-backed ChatGPT device login when needed.
 6. Starts Codex remote control and prints a fresh pairing code.
 
-If setup is interrupted after allocation, the Droplet remains allocated and may be billable. Resume with the instance command printed by the script, such as `./create.sh --instance worker-20260726-120000-12345-6789`; it verifies and resumes the existing token, checkout, login, and daemon instead of allocating another machine. If the retained two-day token expired, `create.sh` asks for and validates a replacement while preserving the checkout and branch. A protected replacement journal records both credential values until the old one is revoked. Use `./destroy.sh --instance <instance-id>` to abandon the setup.
+If setup is interrupted after allocation, the Droplet remains allocated and may be billable. Resume with the complete instance command printed by the script, such as `./vps_create.sh --instance worker-20260726-120000-12345-6789 mattcurf/testrepo,main`; it verifies and resumes the existing token, checkout, login, and daemon instead of allocating another machine. The repository and base branch must match the source persisted for that instance; a mismatch is refused before credential or checkout mutation. If the retained two-day token expired, `vps_create.sh` asks for and validates a replacement while preserving the checkout and branch. A protected replacement journal records both credential values until the old one is revoked. Use `./vps_destroy.sh --instance <instance-id>` to abandon the setup.
 
 The GitHub prompt creates a fine-grained PAT. Verify that it:
 
-- Targets only `REPOSITORY`.
+- Targets only the repository passed to `vps_create.sh`.
 - Expires in two days.
 - Grants `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`.
 - Has any organization-required approval.
@@ -126,9 +126,9 @@ Repository code running as `agent` can necessarily read this credential. Keep de
 
 Remote control requires Codex CLI 0.143.0 or newer. The VPS login must use the same ChatGPT account and workspace as the controlling client. API-key and access-token logins are rejected because they do not enroll the host for direct remote control. No inbound app-server port is opened; the daemon uses the Codex secure relay.
 
-The daemon survives SSH logout but not a VPS reboot. Rerun `./create.sh --instance <instance-id>` after reboot to restart it and obtain a new pairing code.
+The daemon survives SSH logout but not a VPS reboot. Rerun `./vps_create.sh --instance <instance-id> OWNER/REPOSITORY,BASE_BRANCH` after reboot to restart it and obtain a new pairing code.
 
-`create.sh` writes a concrete OpenSSH host entry in the selected instance's state directory. Use it directly:
+`vps_create.sh` writes a concrete OpenSSH host entry in the selected instance's state directory. Use it directly:
 
 ```bash
 instance="worker-20260726-120000-12345-6789"
@@ -149,7 +149,7 @@ Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be 
 ### Destroy the environment
 
 ```bash
-./destroy.sh --instance worker-20260726-120000-12345-6789
+./vps_destroy.sh --instance worker-20260726-120000-12345-6789
 ```
 
 Run this when development is complete, including after a setup failure. It attempts to stop the remote-control daemon, deletes the exact Droplet ID recorded for that instance, and then revokes its retained fine-grained PAT. If an unknown deletion failure occurs, it leaves the PAT and state active for a safe retry. If deletion succeeds but revocation fails, rerun the same instance-specific destroy command. After independently revoking the token or accepting its remaining expiration window, add `--forget-unrevoked-token`. Remove the environment from the controlling client if it remains listed after destruction.
@@ -160,41 +160,41 @@ If allocation was interrupted before DigitalOcean returned an ID, both scripts r
 
 ## Multiple concurrent workers
 
-One configuration is a reusable VPS profile. Create as many independent instances of that profile as needed:
+One configuration is a reusable infrastructure profile. Create as many independent instances of that profile as needed, including instances based on different repositories or base branches:
 
 ```bash
-./create.sh --new
-./create.sh --new
+./vps_create.sh --new mattcurf/frontend,main
+./vps_create.sh --new mattcurf/backend,develop
 ```
 
-Each invocation prints its generated instance ID before allocating and again in the final connection summary. Instances receive separate Droplets, generated work branches, credentials, SSH files, and lifecycle locks beneath `.state/instances/<instance-id>/`.
+Each invocation prints its generated instance ID before allocating and again in the final connection summary. Instances receive separate Droplets, repository sources, generated work branches, credentials, SSH files, and lifecycle locks beneath `.state/instances/<instance-id>/`. `vps_list.sh` includes each instance's persisted repository and base branch.
 
 List locally known instances at any time:
 
 ```bash
-./list.sh
+./vps_list.sh
 ```
 
 Resume one instance after interruption or reboot:
 
 ```bash
-./create.sh --instance worker-20260726-120000-12345-6789
+./vps_create.sh --instance worker-20260726-120000-12345-6789 mattcurf/frontend,main
 ```
 
 Destroy that exact instance:
 
 ```bash
-./destroy.sh --instance worker-20260726-120000-12345-6789
+./vps_destroy.sh --instance worker-20260726-120000-12345-6789
 ```
 
 You may also choose a memorable ID instead of generating one; the same command creates it when absent and resumes it when present:
 
 ```bash
-./create.sh --instance frontend-a
-./create.sh --instance backend-a
+./vps_create.sh --instance frontend-a mattcurf/frontend,main
+./vps_create.sh --instance backend-a mattcurf/backend,develop
 ```
 
-`create.sh` always requires `--new` or `--instance`, and `destroy.sh` always requires `--instance`. There is no unscoped single-instance state or bare destroy operation.
+`vps_create.sh` always requires `--new` or `--instance` plus exactly one repository/base-branch argument. `vps_destroy.sh` always requires only `--instance`, because the instance state records the exact Droplet and credential to remove. There is no unscoped single-instance state or bare destroy operation.
 
 ## Operational hardening
 
