@@ -1,5 +1,6 @@
 name: Release
 on:
+  pull_request:
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -35,10 +36,13 @@ jobs:
           DRY_VERSION: ${{ inputs.version }}
         run: |
           package=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "vps") | .version')
-          requested=${GITHUB_REF_NAME#v}
-          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] && requested=$DRY_VERSION
+          case "$GITHUB_EVENT_NAME" in
+            push) requested=${GITHUB_REF_NAME#v} ;;
+            workflow_dispatch) requested=$DRY_VERSION ;;
+            *) requested=$package ;;
+          esac
           [[ "$requested" == "$package" && "$package" != *-* ]] || { echo 'tag/input must equal a non-prerelease Cargo package version' >&2; exit 1; }
-          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || git verify-tag "$GITHUB_REF_NAME"
+          [[ "$GITHUB_EVENT_NAME" != push ]] || git verify-tag "$GITHUB_REF_NAME"
           [[ "$(cargo run --locked -- --version)" == *"$package"* ]] || { echo 'CLI version mismatch' >&2; exit 1; }
           echo "version=$package" >>"$GITHUB_OUTPUT"
       - run: cargo fmt --all -- --check
