@@ -17,6 +17,8 @@ This repository exists to move agent-driven development off the developer's lapt
 ## Security and cost model
 
 - A Droplet is billable until `vps_destroy.sh` successfully deletes it. Powering it off is not enough.
+- `vps_pause.sh` performs a cold suspend: it shuts down Docker workloads, snapshots the boot disk, and deletes the Droplet. Compute billing stops only after deletion is confirmed; the private snapshot remains billed as storage (currently $0.06/GB/month, subject to DigitalOcean pricing changes).
+- A paused snapshot contains the checkout, databases, GitHub PAT, and ChatGPT login. Treat it as a credential-bearing private machine image; never share or publish it. Normal resume and destroy delete it.
 - Remote control performs a separate ChatGPT device login on the VPS and never copies the local Codex credential.
 - A persistent remote-control workspace uses a dedicated fine-grained PAT restricted to the repository selected for that instance. The VPS keeps that credential so its agent can run both Git and `gh` operations without the host. The provisioning host retains a mode-`0600` copy only so teardown can revoke it if the VPS is unreachable.
 - The Codex process necessarily has access to the VPS's ChatGPT and GitHub credentials. Repository code running as `agent` could attempt to read or exfiltrate them, so use this workflow only with repositories you trust.
@@ -56,9 +58,10 @@ gh auth login
 
 Create a custom-scoped DigitalOcean personal access token with these scopes for the scripts as configured. See DigitalOcean's [custom scope reference](https://docs.digitalocean.com/reference/api/scopes/) for the current definitions and dependencies.
 
-- `droplet:create`, `droplet:read`, and `droplet:delete` — create, poll, and destroy the worker.
+- `droplet:create`, `droplet:read`, `droplet:update`, and `droplet:delete` — create, poll, shut down, and destroy the worker.
 - `regions:read`, `sizes:read`, `actions:read`, and `image:read` — required dependencies of the Droplet create/delete scopes.
-- `snapshot:read` and `vpc:read` — additional dependencies enforced by DigitalOcean's token-creation UI for these selections.
+- `image:create`, `snapshot:read`, `snapshot:delete`, and `image:delete` — create, verify, and remove private recovery snapshots. `image:delete`, `image:read`, `droplet:read`, `regions:read`, `sizes:read`, `actions:read`, and `snapshot:read` are dependencies of `snapshot:delete`.
+- `vpc:read` — an additional dependency enforced by DigitalOcean's token-creation UI.
 - `ssh_key:read` — embed the existing `DO_SSH_KEY` in the new Droplet. It also permits the `doctl compute ssh-key list` discovery command below.
 - `tag:create` and `tag:read` — apply `DO_TAGS` during creation; `tag:read` is required by `tag:create`.
 
@@ -156,15 +159,36 @@ Remote root login is disabled.
 
 Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be attached to as live remote-control sessions. Start new work through the paired client.
 
+### Pause and resume the environment
+
+```bash
+./vps_pause.sh --instance frontend-a
+./vps_list.sh
+./vps_resume.sh --instance frontend-a
+./vps_shell.sh frontend-a
+```
+
+Pause is a cold boot cycle, not a RAM suspend. Running processes are lost. Before shutdown, the script verifies the worker was provisioned with snapshot-safe cloud-init host-key preservation, stops Codex remote control, records the running and healthy Docker containers, gracefully stops them (including Supabase/Postgres), runs `sync`, and verifies the SSH host key. It then powers off the Droplet, creates and verifies a private boot-disk snapshot, and deletes the Droplet. Workers created before this support was added must be recreated before they can be paused. Do not pause while another operator or process is independently writing through SSH; the local lifecycle lock cannot prevent an unrelated shell from changing the disk.
+
+Attached DigitalOcean block-storage volumes are not captured by a Droplet snapshot and are rejected by this initial pause implementation. Docker named volumes and database data on the Droplet's boot disk are preserved.
+
+Resume creates a replacement Droplet from the recorded snapshot in the original region and size. Its Droplet ID and public IP change, but the generated alias remains `codex-vps-<instance-id>` and `vps_shell.sh` always reads the latest endpoint. Resume requires the preserved SSH Ed25519 host key, restarts only the containers that were running before pause, waits for previously healthy containers, verifies the checkout and credentials, restarts remote control, and prints a new pairing code. The snapshot is deleted only after those checks pass.
+
+If the repository-scoped two-day PAT expires during a long pause, resume prompts for and validates a replacement fine-grained PAT while retaining a protected replacement journal until the old credential is revoked. The recovery snapshot is not deleted until this succeeds. The ChatGPT login is expected to survive in the snapshot; a missing or foreign ownership marker is refused.
+
+Every pause/resume provider mutation is journaled beneath `.state/instances/<instance>/`. Rerun the same command after interruption. `vps_list.sh` reports phases such as `pausing-snapshot`, `resuming-recovery`, and `active-snapshot-cleanup-pending`. Shell access is refused during unsafe phases, but remains available when only snapshot cleanup is pending. In that final state, rerun `vps_resume.sh`; do not start another pause until cleanup succeeds.
+
+Provider 404s are conservative because they can indicate the wrong `doctl` account. After independently verifying the account and absence of the exact resource, use `--confirm-missing-droplet` or `--confirm-missing-snapshot` as directed. Use `--confirm-request-not-accepted` only when a journaled snapshot/create request has no matching provider resource and you have independently confirmed DigitalOcean never accepted it.
+
 ### Destroy the environment
 
 ```bash
 ./vps_destroy.sh --instance worker-20260726-120000-12345-6789
 ```
 
-Run this when development is complete, including after a setup failure. It attempts to stop the remote-control daemon, deletes the exact Droplet ID recorded for that instance, and then revokes its retained fine-grained PAT. If an unknown deletion failure occurs, it leaves the PAT and state active for a safe retry. If deletion succeeds but revocation fails, rerun the same instance-specific destroy command. After independently revoking the token or accepting its remaining expiration window, add `--forget-unrevoked-token`. Remove the environment from the controlling client if it remains listed after destruction.
+Run this when development is complete, including after a setup, pause, or resume failure. It inventories the active/source/replacement Droplets and retained snapshot from local journals, confirms all possible Droplets are absent before revoking the PAT, and removes the credential-bearing snapshot. If snapshot deletion fails after Droplet deletion, credential revocation still proceeds and snapshot ownership state remains for retry. After independently revoking the token or accepting its remaining expiration window, add `--forget-unrevoked-token`. Remove the environment from the controlling client if it remains listed after destruction.
 
-A DigitalOcean 404 may mean either that the Droplet was deleted elsewhere or that `doctl` is authenticated to a different account. Teardown revokes the PAT on 404 but retains the Droplet state. After verifying the account and confirming the Droplet is absent, rerun the instance-specific command with `--confirm-missing-droplet`.
+A DigitalOcean 404 may mean either that a resource was deleted elsewhere or that `doctl` is authenticated to a different account. Teardown retains credentials and state until you verify the account and rerun with the applicable `--confirm-missing-droplet` or `--confirm-missing-snapshot` flag.
 
 If allocation was interrupted before DigitalOcean returned an ID, both scripts reconcile it through a unique lifecycle tag. A zero-match lookup is treated as temporarily uncertain and retains its checkpoint. Only after independently confirming that no tagged Droplet exists should you add `--forget-unresolved-allocation` to that instance's destroy command.
 
@@ -195,6 +219,13 @@ Resume one instance after interruption or reboot:
 
 ```bash
 ./vps_create.sh --instance worker-20260726-120000-12345-6789 example-org/frontend,main
+```
+
+Cold-pause and resume one instance while preserving its boot disk:
+
+```bash
+./vps_pause.sh --instance frontend-a
+./vps_resume.sh --instance frontend-a
 ```
 
 Destroy that exact instance:

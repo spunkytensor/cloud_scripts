@@ -8,6 +8,8 @@ source "${SCRIPT_DIR}/lib.sh"
 
 forget_unresolved_allocation=false
 confirm_missing_droplet=false
+confirm_missing_snapshot=false
+confirm_request_not_accepted=false
 forget_unrevoked_token=false
 instance_id=""
 instance_option_seen=false
@@ -29,16 +31,24 @@ while (( $# > 0 )); do
       confirm_missing_droplet=true
       shift
       ;;
+    --confirm-missing-snapshot)
+      confirm_missing_snapshot=true
+      shift
+      ;;
+    --confirm-request-not-accepted)
+      confirm_request_not_accepted=true
+      shift
+      ;;
     --forget-unrevoked-token)
       forget_unrevoked_token=true
       shift
       ;;
     *)
-      die "usage: ./vps_destroy.sh [--instance INSTANCE_ID] [--forget-unresolved-allocation] [--confirm-missing-droplet] [--forget-unrevoked-token]"
+      die "usage: ./vps_destroy.sh [--instance INSTANCE_ID] [--forget-unresolved-allocation] [--confirm-missing-droplet] [--confirm-missing-snapshot] [--confirm-request-not-accepted] [--forget-unrevoked-token]"
       ;;
   esac
 done
-[[ "${instance_option_seen}" == true ]] || die "usage: ./vps_destroy.sh --instance INSTANCE_ID [--forget-unresolved-allocation] [--confirm-missing-droplet] [--forget-unrevoked-token]"
+[[ "${instance_option_seen}" == true ]] || die "usage: ./vps_destroy.sh --instance INSTANCE_ID [--forget-unresolved-allocation] [--confirm-missing-droplet] [--confirm-missing-snapshot] [--confirm-request-not-accepted] [--forget-unrevoked-token]"
 
 load_config true
 select_instance_state "${instance_id}"
@@ -189,6 +199,183 @@ revoke_or_explicitly_forget_github_token() {
   return 1
 }
 
+if [[ -f "${VPS_STATE_FILE}.paused" || -f "${VPS_STATE_FILE}.transition" ]]; then
+  require_command doctl
+  require_command jq
+  active_droplet_id=""
+  source_droplet_id=""
+  target_droplet_id=""
+  target_lifecycle_tag=""
+  owned_snapshot_id=""
+  owned_snapshot_name=""
+  owned_snapshot_source_id=""
+  owned_snapshot_region=""
+  owned_snapshot_disk=0
+
+  if [[ -f "${VPS_STATE_FILE}.paused" ]]; then
+    load_paused_state
+    owned_snapshot_id="${SNAPSHOT_ID}"
+    owned_snapshot_name="${SNAPSHOT_NAME}"
+    owned_snapshot_source_id="${SNAPSHOT_SOURCE_DROPLET_ID}"
+    owned_snapshot_region="${DROPLET_REGION}"
+    owned_snapshot_disk="${SOURCE_DISK_SIZE:-0}"
+  fi
+  if [[ -f "${VPS_STATE_FILE}.transition" ]]; then
+    load_transition_state
+    owned_snapshot_id="${SNAPSHOT_ID:-${owned_snapshot_id}}"
+    owned_snapshot_name="${SNAPSHOT_NAME:-${owned_snapshot_name}}"
+    owned_snapshot_source_id="${SOURCE_DROPLET_ID:-${owned_snapshot_source_id}}"
+    owned_snapshot_region="${SOURCE_REGION:-${owned_snapshot_region}}"
+    owned_snapshot_disk="${SOURCE_DISK_SIZE:-${owned_snapshot_disk}}"
+    if [[ "${TRANSITION_KIND}" == pause && "${SOURCE_DELETE_CONFIRMED:-0}" != 1 ]]; then
+      source_droplet_id="${SOURCE_DROPLET_ID:-}"
+    fi
+    if [[ "${TRANSITION_KIND}" == resume ]]; then
+      target_droplet_id="${TARGET_DROPLET_ID:-}"
+      target_lifecycle_tag="${TARGET_LIFECYCLE_TAG:-}"
+    fi
+  fi
+
+  if [[ "${TRANSITION_KIND:-}" == pause && "${SNAPSHOT_REQUESTED:-0}" == 1 && -z "${owned_snapshot_id}" ]]; then
+    snapshots_json="$(doctl compute snapshot list --resource droplet --output json)" ||
+      die "could not reconcile the pending snapshot before teardown"
+    snapshot_matches="$(jq --arg name "${SNAPSHOT_NAME}" --arg source "${SOURCE_DROPLET_ID}" --arg region "${SOURCE_REGION}" \
+      '[.[] | select(.name == $name and .resource_type == "droplet" and .resource_id == $source and (.regions | index($region) != null))]' <<<"${snapshots_json}")"
+    snapshot_match_count="$(jq 'length' <<<"${snapshot_matches}")"
+    if [[ "${snapshot_match_count}" == 1 ]]; then
+      owned_snapshot_id="$(jq -er '.[0].id' <<<"${snapshot_matches}")"
+      SNAPSHOT_ID="${owned_snapshot_id}"
+      write_transition_state
+    elif [[ "${snapshot_match_count}" != 0 ]]; then
+      die "multiple snapshots match the pending request; refusing partial teardown"
+    elif [[ "${confirm_request_not_accepted}" == true ]]; then
+      SNAPSHOT_REQUESTED=0
+      write_transition_state
+      log "accepted operator confirmation that the pending snapshot request was not accepted"
+    else
+      die "snapshot creation may still complete; retry later, or after independently confirming rejection use --confirm-request-not-accepted"
+    fi
+  fi
+  if [[ -f "${VPS_STATE_FILE}" ]]; then
+    load_state
+    active_droplet_id="${DROPLET_ID}"
+  fi
+
+  # Used by write_transition_state through its fixed variable list.
+  # shellcheck disable=SC2034
+  TEARDOWN_STARTED=1
+  TARGET_DELETE_CONFIRMED="${TARGET_DELETE_CONFIRMED:-0}"
+  if [[ -f "${VPS_STATE_FILE}.transition" ]]; then
+    write_transition_state
+  fi
+
+  if [[ "${TARGET_DELETE_CONFIRMED}" != 1 && -z "${target_droplet_id}" && -n "${target_lifecycle_tag}" && "${TARGET_CREATE_REQUESTED:-0}" == 1 ]]; then
+    matches="$(doctl compute droplet list --tag-name "${target_lifecycle_tag}" --output json)" ||
+      die "could not reconcile replacement Droplet by lifecycle tag"
+    match_count="$(jq 'length' <<<"${matches}")"
+    if [[ "${match_count}" == 1 ]]; then
+      target_droplet_id="$(jq -er '.[0].id' <<<"${matches}")"
+      TARGET_DROPLET_ID="${target_droplet_id}"
+      write_transition_state
+    elif [[ "${match_count}" != 0 ]]; then
+      die "multiple Droplets have lifecycle tag ${target_lifecycle_tag}; refusing partial teardown"
+    elif [[ "${forget_unresolved_allocation}" != true ]]; then
+      die "replacement allocation remains uncertain; retry later, or confirm no tagged Droplet exists with --forget-unresolved-allocation"
+    fi
+  fi
+
+  delete_transition_droplet() {
+    local droplet_id="$1"
+    local output status http_status
+    [[ -n "${droplet_id}" ]] || return 0
+    set +e
+    output="$(doctl_mutate compute droplet delete "${droplet_id}" --force 2>&1)"
+    status=$?
+    set -e
+    if (( status == 0 )); then
+      log "deleted Droplet ${droplet_id}"
+      return 0
+    fi
+    http_status="$(doctl_http_status <<<"${output}")"
+    if [[ "${http_status}" == 404 && "${confirm_missing_droplet}" == true ]]; then
+      log "accepted operator confirmation that Droplet ${droplet_id} is absent"
+      return 0
+    fi
+    [[ -z "${output}" ]] || printf '%s\n' "${output}" >&2
+    return 1
+  }
+
+  droplets_confirmed_absent=true
+  deleted_ids=""
+  for candidate_id in "${active_droplet_id}" "${source_droplet_id}" "$([[ "${TARGET_DELETE_CONFIRMED}" == 1 ]] || printf '%s' "${target_droplet_id}")"; do
+    [[ -n "${candidate_id}" ]] || continue
+    case " ${deleted_ids} " in *" ${candidate_id} "*) continue ;; esac
+    if delete_transition_droplet "${candidate_id}"; then
+      deleted_ids="${deleted_ids}${deleted_ids:+ }${candidate_id}"
+      [[ "${candidate_id}" != "${active_droplet_id}" ]] || rm -f "${VPS_STATE_FILE}"
+      if [[ -f "${VPS_STATE_FILE}.transition" ]]; then
+        if [[ "${candidate_id}" == "${SOURCE_DROPLET_ID:-}" ]]; then
+          SOURCE_DELETE_CONFIRMED=1
+        fi
+        if [[ "${candidate_id}" == "${TARGET_DROPLET_ID:-}" ]]; then
+          TARGET_DELETE_CONFIRMED=1
+        fi
+        write_transition_state
+      fi
+    else
+      droplets_confirmed_absent=false
+    fi
+  done
+  [[ "${droplets_confirmed_absent}" == true ]] || die "not every possible Droplet deletion was confirmed; state and credentials retained"
+
+  revoke_status=0
+  revoke_or_explicitly_forget_github_token || revoke_status=$?
+
+  snapshot_delete_status=0
+  if [[ -n "${owned_snapshot_id}" ]]; then
+    set +e
+    snapshot_lookup="$(doctl compute snapshot get "${owned_snapshot_id}" --output json 2>&1)"
+    snapshot_lookup_status=$?
+    set -e
+    if (( snapshot_lookup_status == 0 )); then
+      validate_snapshot_json "${snapshot_lookup}" "${owned_snapshot_id}" "${owned_snapshot_name}" \
+        "${owned_snapshot_source_id}" "${owned_snapshot_region}" "${owned_snapshot_disk}" ||
+        die "owned snapshot ID no longer matches its recorded identity; refusing deletion"
+      set +e
+      snapshot_output="$(doctl_mutate compute snapshot delete "${owned_snapshot_id}" --force 2>&1)"
+      snapshot_delete_status=$?
+      set -e
+    elif [[ "$(doctl_http_status <<<"${snapshot_lookup}")" == 404 && "${confirm_missing_snapshot}" == true ]]; then
+      snapshot_delete_status=0
+      log "accepted operator confirmation that snapshot ${owned_snapshot_id} is absent"
+    else
+      [[ -z "${snapshot_lookup}" ]] || printf '%s\n' "${snapshot_lookup}" >&2
+      snapshot_delete_status=1
+    fi
+    if (( snapshot_delete_status != 0 )); then
+      [[ -z "${snapshot_output:-}" ]] || printf '%s\n' "${snapshot_output}" >&2
+      log "WARNING: snapshot ${owned_snapshot_id} deletion was not confirmed; credential state was revoked but snapshot ownership state is retained"
+    fi
+  fi
+
+  if (( snapshot_delete_status == 0 )); then
+    rm -f "${VPS_STATE_FILE}.paused"
+    rm -f "${VPS_STATE_FILE}.transition"
+  fi
+  if (( snapshot_delete_status == 0 && revoke_status == 0 )); then
+    rm -f "${VPS_STATE_FILE}.known_hosts" "${VPS_STATE_FILE}.ssh_config" \
+      "${VPS_STATE_FILE}.setup" "${VPS_STATE_FILE}.remote-control" "${VPS_STATE_FILE}.allocation"
+    if [[ -n "${owned_snapshot_id}" && -z "${deleted_ids}" ]]; then
+      printf 'Destroyed paused instance %s (snapshot %s). Compute billing had already stopped; snapshot storage has been removed.\n' \
+        "${instance_id}" "${owned_snapshot_id}"
+    else
+      printf 'Destroyed instance %s and removed its owned snapshot storage. DigitalOcean compute billing has stopped.\n' "${instance_id}"
+    fi
+    exit 0
+  fi
+  (( snapshot_delete_status == 0 && revoke_status == 0 ))
+fi
+
 allocation_cleanup_completed=false
 if [[ ! -f "${VPS_STATE_FILE}" && -f "${allocation_state_file}" ]]; then
   # Generated by vps_create.sh with shell-escaped values.
@@ -267,7 +454,6 @@ fi
 
 log "destroying Droplet ${DROPLET_ID} (${DROPLET_NAME:-unknown}, ${DROPLET_IP:-IP pending})"
 delete_status=0
-missing_droplet_404=false
 if ! command -v doctl >/dev/null 2>&1; then
   log "WARNING: required command not found: doctl"
   delete_status=1
@@ -279,7 +465,6 @@ else
   if (( delete_status != 0 )); then
     http_status="$(doctl_http_status <<<"${delete_output}")"
     if [[ "${http_status}" == 404 ]]; then
-      missing_droplet_404=true
       if [[ "${confirm_missing_droplet}" == true ]]; then
         log "accepting operator confirmation that missing Droplet ${DROPLET_ID} is already deleted"
         delete_status=0
@@ -295,7 +480,7 @@ else
 fi
 
 revoke_status=0
-if (( delete_status == 0 )) || [[ "${missing_droplet_404}" == true ]]; then
+if (( delete_status == 0 )); then
   revoke_or_explicitly_forget_github_token || revoke_status=$?
 else
   log "Droplet deletion was not confirmed; retaining its GitHub credential"
