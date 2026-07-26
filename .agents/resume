@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+printf 'This repository has no persistent services to resume.\n'
