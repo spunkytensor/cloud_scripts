@@ -85,6 +85,19 @@ remote_ssh() {
     "${REMOTE_SSH_USER}@${DROPLET_IP}" "$@"
 }
 
+remote_ssh_tty() {
+  [[ -n "${DROPLET_IP:-}" ]] || die "Droplet does not have a public IP yet"
+  ssh -tt \
+    -i "${SSH_PRIVATE_KEY_FILE}" \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS_FILE}" \
+    -o StrictHostKeyChecking=accept-new \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=4 \
+    "${REMOTE_SSH_USER}@${DROPLET_IP}" "$@"
+}
+
 remote_exec() {
   local command=""
   local quoted

@@ -87,6 +87,7 @@ done
 write_state "${droplet_id}" "${droplet_ip}" "${DROPLET_NAME}"
 load_state
 
+install -m 0600 /dev/null "${SSH_CONFIG_FILE}"
 cat >"${SSH_CONFIG_FILE}" <<EOF
 Host ${SSH_ALIAS}
   HostName ${DROPLET_IP}
@@ -96,7 +97,6 @@ Host ${SSH_ALIAS}
   UserKnownHostsFile "${KNOWN_HOSTS_FILE}"
   StrictHostKeyChecking accept-new
 EOF
-chmod 0600 "${SSH_CONFIG_FILE}"
 
 log "Droplet ${DROPLET_ID} is ${DROPLET_IP}; waiting for SSH as ${REMOTE_SSH_USER}"
 for attempt in {1..120}; do

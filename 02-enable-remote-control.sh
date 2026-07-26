@@ -53,7 +53,7 @@ if (( login_status_code == 0 )); then
   [[ -n "${enrolled_at}" ]] || die "remote-control enrollment marker is invalid: ${remote_control_marker}"
 elif [[ "${login_status}" == *"Not logged in"* ]]; then
   log "starting the headless ChatGPT device-login flow"
-  remote_ssh "${remote_codex} login --device-auth"
+  remote_ssh_tty "${remote_codex} login --device-auth"
 else
   die "could not determine remote Codex login status: ${login_status}"
 fi

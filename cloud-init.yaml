@@ -36,10 +36,47 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
-      token_file="${HOME}/.config/vps-codex/github-token"
-      if [[ -s "${token_file}" ]]; then
+      token_file=""
+      if [[ -n "${HOME:-}" ]]; then
+        token_file="${HOME}/.config/vps-codex/github-token"
+      fi
+      if [[ -n "${token_file}" && -s "${token_file}" ]]; then
         export GH_TOKEN="$(cat "${token_file}")"
       fi
+
+      if [[ "${1:-}" == auth && "${2:-}" == setup-git ]]; then
+        [[ -s "${token_file}" ]] || {
+          echo "GitHub credential is missing: ${token_file:-HOME is unset}" >&2
+          exit 1
+        }
+        hostname="github.com"
+        shift 2
+        while (( $# > 0 )); do
+          case "$1" in
+            -h|--hostname)
+              (( $# >= 2 )) || { echo "$1 requires a hostname" >&2; exit 2; }
+              hostname="$2"
+              shift 2
+              ;;
+            -f|--force)
+              shift
+              ;;
+            *)
+              echo "unsupported gh auth setup-git argument: $1" >&2
+              exit 2
+              ;;
+          esac
+        done
+        [[ "${hostname}" == github.com ]] || {
+          echo "this worker only supports gh auth setup-git for github.com" >&2
+          exit 2
+        }
+        git config --global --unset-all 'credential.https://github.com.helper' >/dev/null 2>&1 || true
+        git config --global --add 'credential.https://github.com.helper' ''
+        git config --global --add 'credential.https://github.com.helper' '!/usr/local/bin/gh auth git-credential'
+        exit 0
+      fi
+
       exec /usr/bin/gh "$@"
   - path: /etc/sysctl.d/60-codex-worker.conf
     permissions: "0644"
@@ -70,8 +107,7 @@ write_files:
       ln -sfn /home/agent/.local/bin/codex /usr/local/bin/codex
 
       install -d -o agent -g agent -m 0755 \
-        /workspace \
-        /workspace/projects \
+        /home/agent/projects \
         /home/agent/.codex \
         /home/agent/.config/vps-codex
 

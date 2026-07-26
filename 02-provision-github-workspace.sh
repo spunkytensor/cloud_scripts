@@ -26,10 +26,17 @@ repository="${repository%/}"
 [[ "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "REPOSITORY must identify one github.com owner/repository"
 
 token_state_file="${VPS_STATE_FILE}.github-token"
+if [[ -e "${token_state_file}" && ! -s "${token_state_file}" ]]; then
+  rm -f "${token_state_file}"
+  log "removed an empty GitHub credential marker left by an interrupted write"
+fi
 [[ ! -e "${token_state_file}" ]] || die "a persistent GitHub credential already exists at ${token_state_file}; destroy this VPS before provisioning another"
 if ! remote_github_state="$(remote_ssh '
-  if test -e /home/agent/.config/vps-codex/github-token; then
+  if test -s /home/agent/.config/vps-codex/github-token; then
     printf present
+  elif test -e /home/agent/.config/vps-codex/github-token; then
+    rm -f /home/agent/.config/vps-codex/github-token
+    printf absent
   else
     printf absent
   fi
@@ -93,15 +100,19 @@ base_branch="$2"
 work_branch="$3"
 git_name="$4"
 git_email="$5"
-checkout_dir="/workspace/projects/${repository##*/}"
+projects_dir="${HOME}/projects"
+checkout_dir="${projects_dir}/${repository##*/}"
 
 [[ "$(id -un)" == agent ]] || { echo "workspace provisioning must run as agent" >&2; exit 1; }
 [[ -s "${HOME}/.config/vps-codex/github-token" ]] || { echo "GitHub credential is missing" >&2; exit 1; }
+install -d -m 0755 "${projects_dir}"
 [[ ! -e "${checkout_dir}" ]] || { echo "checkout already exists: ${checkout_dir}" >&2; exit 1; }
 
-# Point Git at the root-owned wrapper rather than /usr/bin/gh. The wrapper
-# loads this VPS's protected token file for every later credential request.
-git config --global credential.helper '!/usr/local/bin/gh auth git-credential'
+# Reset inherited helpers and point Git at the root-owned wrapper. The empty
+# URL-scoped entry clears lower-priority helpers before the protected wrapper.
+git config --global --unset-all 'credential.https://github.com.helper' >/dev/null 2>&1 || true
+git config --global --add 'credential.https://github.com.helper' ''
+git config --global --add 'credential.https://github.com.helper' '!/usr/local/bin/gh auth git-credential'
 git clone --branch "${base_branch}" --single-branch "https://github.com/${repository}.git" "${checkout_dir}"
 cd "${checkout_dir}"
 git config --local user.name "${git_name}"
@@ -111,7 +122,7 @@ git ls-remote --exit-code origin "refs/heads/${base_branch}" >/dev/null
 /usr/local/bin/gh repo view "${repository}" --json nameWithOwner --jq .nameWithOwner >/dev/null
 REMOTE
 
-checkout_dir="/workspace/projects/${repository##*/}"
+checkout_dir="/home/agent/projects/${repository##*/}"
 printf '\nGitHub workspace ready\n  GitHub actor: %s\n  repository: %s\n  checkout: %s\n  branch: %s\n  token retained for revocation: %s\n\nThe VPS can now run git and gh operations without the provisioning host.\nConnect with:\n  ssh -F %q %q\n' \
   "${github_actor}" "${repository}" "${checkout_dir}" "${WORK_BRANCH}" "${token_state_file}" \
   "${SSH_CONFIG_FILE}" "${SSH_ALIAS}"

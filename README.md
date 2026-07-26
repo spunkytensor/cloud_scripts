@@ -109,12 +109,12 @@ The script prints a pre-filled GitHub fine-grained PAT creation URL. In GitHub, 
 - Grants `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`.
 - Has any organization-required approval.
 
-After you paste the token into the hidden prompt, the script validates repository access, stores protected copies on the host and VPS, configures HTTPS Git authentication, clones into `/workspace/projects`, configures repository-local commit identity, and creates `WORK_BRANCH`. The token never appears in the Git remote URL or `config.env`.
+After you paste the token into the hidden prompt, the script validates repository access, stores protected copies on the host and VPS, configures HTTPS Git authentication, clones into `/home/agent/projects`, configures repository-local commit identity, and creates `WORK_BRANCH`. The token never appears in the Git remote URL or `config.env`.
 
 The VPS then stands on its own. Both interactive SSH shells and the Codex-controlled environment can use ordinary commands such as:
 
 ```bash
-cd /workspace/projects/your-repository
+cd /home/agent/projects/your-repository
 git fetch
 git push -u origin "$WORK_BRANCH"
 gh pr create
@@ -143,7 +143,7 @@ The VPS login must use the same ChatGPT account and workspace as the controlling
 
 The daemon survives SSH logout, but not a VPS reboot. Rerun `02-enable-remote-control.sh` after reboot to restart it and obtain a new pairing code.
 
-Run the workspace-provisioning step above before pairing if you want the agent to begin with a repository checkout and autonomous GitHub access.
+Workspace provisioning and remote-control enrollment are intentionally compatible: the agent needs both the VPS-specific GitHub credential and its ChatGPT login. Run workspace provisioning before pairing if you want the agent to begin with the checkout, or run it afterward without reenrolling remote control.
 
 Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be attached to as live remote-control sessions. Start new work through the paired client.
 
@@ -153,7 +153,7 @@ Ordinary `codex` or `codex exec` sessions started separately over SSH cannot be 
 ./03-destroy.sh
 ```
 
-Run this when development is complete, including after a provisioning or remote-control failure. It attempts to stop the remote-control daemon, deletes the Droplet rather than merely powering it off, and revokes the retained fine-grained PAT through GitHub's credential revocation API. Revocation uses the host copy and therefore works even if SSH is unavailable. If GitHub revocation fails, Droplet deletion still proceeds to stop billing; the protected token is retained and rerunning `03-destroy.sh` retries revocation. Remove the environment from the controlling client if it remains listed after destruction.
+Run this when development is complete, including after a provisioning or remote-control failure. It attempts to stop the remote-control daemon, deletes the Droplet rather than merely powering it off, and then revokes the retained fine-grained PAT through GitHub's credential revocation API. Revocation uses the host copy and therefore works even if SSH is unavailable. If Droplet deletion is not confirmed, the script leaves the PAT active and retains both Droplet and token state for a safe retry. If deletion succeeds but GitHub revocation fails, the protected token is retained and rerunning `03-destroy.sh` retries only revocation. Remove the environment from the controlling client if it remains listed after destruction.
 
 ## Multiple concurrent workers
 

@@ -14,7 +14,12 @@ revoke_github_token() {
   local response_file
   local github_token
 
-  [[ -s "${token_state_file}" ]] || return 0
+  [[ -e "${token_state_file}" ]] || return 0
+  if [[ ! -s "${token_state_file}" ]]; then
+    rm -f "${token_state_file}"
+    log "removed an empty GitHub credential marker"
+    return 0
+  fi
   if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
     log "WARNING: curl and jq are required to revoke the GitHub credential"
     return 1
@@ -54,9 +59,9 @@ revoke_github_token() {
 }
 
 if [[ ! -f "${VPS_STATE_FILE}" ]]; then
-  if [[ -s "${token_state_file}" ]]; then
+  if [[ -e "${token_state_file}" ]]; then
     revoke_github_token || die "credential revocation failed; rerun 03-destroy.sh to retry"
-    printf 'Revoked the retained GitHub credential; no Droplet state existed.\n'
+    printf 'Cleaned up the retained GitHub credential state; no Droplet state existed.\n'
     exit 0
   fi
   die "state file not found: ${VPS_STATE_FILE}; run 01-allocate.sh first"
@@ -79,13 +84,28 @@ delete_status=0
 if ! command -v doctl >/dev/null 2>&1; then
   log "WARNING: required command not found: doctl"
   delete_status=1
-elif ! doctl compute droplet delete "${DROPLET_ID}" --force; then
-  log "WARNING: DigitalOcean did not confirm deletion of Droplet ${DROPLET_ID}"
-  delete_status=1
+else
+  set +e
+  delete_output="$(doctl compute droplet delete "${DROPLET_ID}" --force 2>&1)"
+  delete_status=$?
+  set -e
+  if (( delete_status != 0 )); then
+    if grep -Eq '(^|[^[:digit:]])404([^[:digit:]]|$)' <<<"${delete_output}"; then
+      log "Droplet ${DROPLET_ID} is already absent from DigitalOcean"
+      delete_status=0
+    else
+      [[ -z "${delete_output}" ]] || printf '%s\n' "${delete_output}" >&2
+      log "WARNING: DigitalOcean did not confirm deletion of Droplet ${DROPLET_ID}"
+    fi
+  fi
 fi
 
 revoke_status=0
-revoke_github_token || revoke_status=$?
+if (( delete_status == 0 )); then
+  revoke_github_token || revoke_status=$?
+else
+  log "Droplet deletion was not confirmed; retaining its GitHub credential"
+fi
 
 if (( delete_status == 0 )); then
   rm -f \
