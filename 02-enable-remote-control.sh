@@ -45,7 +45,7 @@ set -e
 
 if (( login_status_code == 0 )); then
   [[ "${login_status}" == *"Logged in using ChatGPT"* ]] || die "remote control requires a ChatGPT login, but the VPS reports: ${login_status}"
-  [[ -f "${remote_control_marker}" ]] || die "the VPS has an untracked ChatGPT credential, possibly left by batch mode; recover it if needed, then run 'codex logout' on the VPS before enrolling remote control"
+  [[ -f "${remote_control_marker}" ]] || die "the VPS has an untracked ChatGPT credential; verify its owner, then run 'codex logout' on the VPS before enrolling it through this script"
   # This local mode-0600 file records that this script performed the VPS login.
   # shellcheck disable=SC1090
   source "${remote_control_marker}"

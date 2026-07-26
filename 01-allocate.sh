@@ -112,6 +112,6 @@ done
 log "waiting for cloud-init (this installs Docker, Node.js, GitHub CLI, and Codex)"
 remote_ssh 'cloud-init status --wait >/dev/null && test -f /opt/codex-worker-ready'
 
-printf 'Droplet ready\n  id: %s\n  ip: %s\n  state: %s\n  SSH alias: %s\n  SSH config: %s\n\nConnect with:\n  ssh -F %q %q\n\nEnable headless Codex remote control with:\n  ./02-enable-remote-control.sh\n' \
+printf 'Droplet ready\n  id: %s\n  ip: %s\n  state: %s\n  SSH alias: %s\n  SSH config: %s\n\nConnect with:\n  ssh -F %q %q\n\nProvision a standalone GitHub workspace with:\n  ./02-provision-github-workspace.sh\n\nEnable headless Codex remote control with:\n  ./02-enable-remote-control.sh\n' \
   "${DROPLET_ID}" "${DROPLET_IP}" "${VPS_STATE_FILE}" "${SSH_ALIAS}" "${SSH_CONFIG_FILE}" \
   "${SSH_CONFIG_FILE}" "${SSH_ALIAS}"

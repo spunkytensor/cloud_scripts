@@ -96,34 +96,3 @@ remote_exec() {
   done
   remote_ssh "${command}"
 }
-
-remote_scp() {
-  [[ -n "${DROPLET_IP:-}" ]] || die "Droplet does not have a public IP yet"
-  scp \
-    -i "${SSH_PRIVATE_KEY_FILE}" \
-    -o "UserKnownHostsFile=${KNOWN_HOSTS_FILE}" \
-    -o StrictHostKeyChecking=accept-new \
-    -o BatchMode=yes \
-    -o ConnectTimeout=10 \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=4 \
-    "$@"
-}
-
-sha256_file() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    sha256sum "$1" | awk '{print $1}'
-  fi
-}
-
-validate_codex_auth() {
-  jq -e '
-    .auth_mode == "chatgpt" and
-    (.tokens.id_token | type == "string" and length > 0) and
-    (.tokens.access_token | type == "string" and length > 0) and
-    (.tokens.refresh_token | type == "string" and length > 0) and
-    (.last_refresh | type == "string" and length > 0)
-  ' "$1" >/dev/null 2>&1
-}

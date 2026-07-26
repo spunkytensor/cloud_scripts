@@ -30,6 +30,17 @@ write_files:
       PermitEmptyPasswords no
       PermitRootLogin no
       AllowUsers agent
+  - path: /usr/local/bin/gh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      token_file="${HOME}/.config/vps-codex/github-token"
+      if [[ -s "${token_file}" ]]; then
+        export GH_TOKEN="$(cat "${token_file}")"
+      fi
+      exec /usr/bin/gh "$@"
   - path: /etc/sysctl.d/60-codex-worker.conf
     permissions: "0644"
     content: |
@@ -60,13 +71,14 @@ write_files:
 
       install -d -o agent -g agent -m 0755 \
         /workspace \
-        /workspace/jobs \
         /workspace/projects \
         /home/agent/.codex \
         /home/agent/.config/vps-codex
 
       command -v docker >/dev/null
       command -v node >/dev/null
+      test -x /usr/bin/gh
+      test -x /usr/local/bin/gh
       test -x /usr/local/bin/codex
       codex_version="$(codex --version | awk '{print $2}')"
       dpkg --compare-versions "${codex_version}" ge 0.143.0
