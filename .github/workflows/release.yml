@@ -61,7 +61,7 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             kind: tar
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             kind: tar
           - os: windows-2022
@@ -114,7 +114,8 @@ jobs:
         shell: bash
         run: |
           cd target
-          if [[ '${{ matrix.kind }}' == tar ]]; then tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
+          if [[ '${{ matrix.kind }}' == tar && "$RUNNER_OS" == macOS ]]; then COPYFILE_DISABLE=1 tar -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
+          if [[ '${{ matrix.kind }}' == tar && "$RUNNER_OS" != macOS ]]; then tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
           if [[ '${{ matrix.kind }}' == zip ]]; then 7z a "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.zip" ./stage/*; fi
       - name: Generate CycloneDX SBOM from final staged filesystem
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
