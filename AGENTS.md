@@ -10,6 +10,17 @@ This is a small Bash control plane for disposable DigitalOcean Codex workers. Ke
 - `config.example.env` is the committed configuration contract. `config.env` and `.state/` are local, ignored, and may contain secrets.
 - `README.md` is the operator guide and must stay consistent with command syntax, prerequisites, lifecycle behavior, security guarantees, and recovery steps.
 
+## Environment-provided credentials
+
+The development environment may provide these values as environment variables:
+
+- `DOCTL_SSH_KEY` — ID or fingerprint of the SSH key installed at DigitalOcean for VPS access.
+- `DOCTL_TOKEN` — token used to authenticate DigitalOcean API requests.
+- `SSH_DIGITAL_OCEAN` — private SSH key corresponding to the installed DigitalOcean key.
+- `SSH_DIGITAL_OCEAN_PUB` — matching public SSH key.
+
+Use these variables when credentials are needed instead of asking for or inventing values. Never print their contents, include them in command output, write them into tracked files, or copy them to a VPS. If a command requires key files, materialize them only in protected temporary files and remove those files when finished.
+
 ## Implementation conventions
 
 - Target Bash, not POSIX `sh`. Preserve `#!/usr/bin/env bash` and `set -euo pipefail` in executable scripts.

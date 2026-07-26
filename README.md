@@ -12,7 +12,7 @@ This repository exists to move agent-driven development off the developer's lapt
 
 **Run work in parallel instead of in series.** A single developer machine forces agents to take turns: one checkout, one set of ports, one dependency tree, one running stack. Because each worker here is an independent machine, several agents can work at once — separate features, separate repositories, competing approaches to the same problem, or a long-running migration alongside ordinary development. `vps_create.sh --new OWNER/REPOSITORY,BASE_BRANCH` allocates another one, `vps_list.sh` shows what is running, and each instance keeps its own Droplet, repository source, work branch, credential, and SSH configuration under `.state/instances/<instance-id>/`. Throughput is limited by what you are willing to pay for and supervise, not by the one machine in front of you.
 
-**Give every copy its own operating system.** Parallel work on a shared host means contending for the same ports, the same Docker daemon, the same database sockets, the same global toolchain versions, and the same filesystem paths — and it means one agent's broken state can break another's. Full-machine isolation removes that entire category of problem. Each worker boots its own Ubuntu instance, so every copy of the stack can bind the same conventional ports, run its own Supabase containers and databases, and install whatever system packages it needs without coordination. It also makes the environment genuinely reproducible: cloud-init builds each machine identically from scratch, so a worker reflects the repository's real requirements rather than a laptop's accumulated local configuration. Damage is contained to one disposable machine, and recovering means destroying it and creating another.
+**Give every copy its own operating system.** Parallel work on a shared host means contending for the same ports, the same Docker daemon, the same database sockets, the same global toolchain versions, and the same filesystem paths — and it means one agent's broken state can break another's. Full-machine isolation removes that entire category of problem. Each worker boots its own Ubuntu instance, so every copy of the stack can bind the same conventional ports, run its own Supabase containers and databases, and install whatever system packages it needs without coordination. It also makes the environment genuinely reproducible: cloud-init builds each machine identically from scratch, so a worker reflects the repository's real requirements rather than a laptop's accumulated local configuration. Every new VPS is a fresh, clean environment with no leftover dependencies, caches, configuration, or processes from earlier work, and any containers it launches start from that clean foundation. Damage is contained to one disposable machine, and recovering means destroying it and creating another.
 
 ## Security and cost model
 
@@ -22,12 +22,14 @@ This repository exists to move agent-driven development off the developer's lapt
 - The Codex process necessarily has access to the VPS's ChatGPT and GitHub credentials. Repository code running as `agent` could attempt to read or exfiltrate them, so use this workflow only with repositories you trust.
 - The remote agent receives outbound network access and root-equivalent Docker socket access so it can run local development infrastructure such as Supabase. Repository code can therefore control the VPS through Docker; use only trusted repositories and dependencies. The agent does not receive DigitalOcean credentials.
 - Cloud-init authorizes the configured shared SSH key for `agent` and disables root SSH login. All post-provisioning SSH operations run directly as the unprivileged `agent` user.
-- Never provision the token returned by the host's `gh auth token` as the persistent VPS credential. Create a dedicated fine-grained PAT restricted to one repository, with a two-day expiration and only the required permissions.
 - SSH bootstrap uses trust on first use (`StrictHostKeyChecking=accept-new`) with a dedicated known-hosts file. This is convenient for an ephemeral worker but does not protect the first connection from an active network attacker. Use an SSH host CA or another independently verified host key before using this pattern in a hostile network.
 
 ## Prerequisites
 
-Install and authenticate the local tools:
+Install and authenticate the local control-plane tools for your operating system:
+
+<details>
+<summary>macOS (Homebrew)</summary>
 
 ```bash
 brew install doctl gh jq
@@ -35,9 +37,24 @@ doctl auth init
 gh auth login
 ```
 
+</details>
+
+<details>
+<summary>Ubuntu 24.04 or 26.04</summary>
+
+```bash
+sudo apt-get update
+sudo apt-get install -y gh git jq openssh-client snapd
+sudo snap install doctl
+doctl auth init
+gh auth login
+```
+
+</details>
+
 ### Minimum DigitalOcean token scopes
 
-Create a custom-scoped DigitalOcean personal access token with these scopes for the scripts as configured:
+Create a custom-scoped DigitalOcean personal access token with these scopes for the scripts as configured. See DigitalOcean's [custom scope reference](https://docs.digitalocean.com/reference/api/scopes/) for the current definitions and dependencies.
 
 - `droplet:create`, `droplet:read`, and `droplet:delete` — create, poll, and destroy the worker.
 - `regions:read`, `sizes:read`, `actions:read`, and `image:read` — required dependencies of the Droplet create/delete scopes.
@@ -46,8 +63,6 @@ Create a custom-scoped DigitalOcean personal access token with these scopes for 
 - `tag:create` and `tag:read` — apply `DO_TAGS` during creation; `tag:read` is required by `tag:create`.
 
 `--enable-monitoring` installs the monitoring agent on the Droplet and does **not** require `monitoring:create`; that scope creates Monitoring alert policies, which these scripts do not manage. The scripts do not require any broad full-access scope.
-
-Use a dedicated, narrowly scoped token for this workflow. Keep it only in the local `doctl` authentication context: do not copy it to the VPS, put it in `config.env`, or commit it. See DigitalOcean's [custom scope reference](https://docs.digitalocean.com/reference/api/scopes/) for the current scope definitions and dependencies.
 
 Find the DigitalOcean SSH key ID or fingerprint to place in the configuration:
 
@@ -74,13 +89,6 @@ At minimum, set:
 - `DO_SSH_KEY`
 - `SSH_PRIVATE_KEY_FILE` to the corresponding private key on the local control machine
 
-The repository and base branch are not profile settings. Pass them together to
-`vps_create.sh` as `OWNER/REPOSITORY,BASE_BRANCH`; GitHub HTTPS and SSH repository
-URLs are also accepted. Each instance persists that source and automatically
-uses branch `codex/<instance-id>`; the work branch is not configurable.
-
-Remove obsolete `REPOSITORY`, `BASE_BRANCH`, `WORK_BRANCH`, `GITHUB_TOKEN_FILE`, `VPS_STATE_FILE`, and `DROPLET_NAME` entries from older configurations. `vps_create.sh` rejects legacy repository settings rather than allowing them to compete with its command-line source; `vps_list.sh` and `vps_destroy.sh` ignore those two settings so an old config cannot block inspection or teardown. All scripts reject the obsolete per-instance path and branch settings. Use `DROPLET_NAME_PREFIX` and `VPS_INSTANCE_STATE_DIR` only when overriding their defaults.
-
 GitHub requires a one-time interactive confirmation to create each instance's fine-grained PAT; neither the REST API nor `gh` can create it unattended. `vps_create.sh` prints a pre-filled creation URL and securely prompts for the result. Tokens cannot be supplied through `config.env`, ensuring teardown can revoke one instance without affecting another.
 
 ## Run the lifecycle
@@ -88,7 +96,7 @@ GitHub requires a one-time interactive confirmation to create each instance's fi
 ### Create or resume the environment
 
 ```bash
-./vps_create.sh --new mattcurf/testrepo,main
+./vps_create.sh --new example-org/testrepo,main
 ```
 
 The script:
@@ -100,7 +108,7 @@ The script:
 5. Starts a TTY-backed ChatGPT device login when needed.
 6. Starts Codex remote control and prints a fresh pairing code.
 
-If setup is interrupted after allocation, the Droplet remains allocated and may be billable. Resume with the complete instance command printed by the script, such as `./vps_create.sh --instance worker-20260726-120000-12345-6789 mattcurf/testrepo,main`; it verifies and resumes the existing token, checkout, login, and daemon instead of allocating another machine. The repository and base branch must match the source persisted for that instance; a mismatch is refused before credential or checkout mutation. If the retained two-day token expired, `vps_create.sh` asks for and validates a replacement while preserving the checkout and branch. A protected replacement journal records both credential values until the old one is revoked. Use `./vps_destroy.sh --instance <instance-id>` to abandon the setup.
+If setup is interrupted after allocation, the Droplet remains allocated and may be billable. Resume with the complete instance command printed by the script, such as `./vps_create.sh --instance worker-20260726-120000-12345-6789 example-org/testrepo,main`; it verifies and resumes the existing token, checkout, login, and daemon instead of allocating another machine. The repository and base branch must match the source persisted for that instance; a mismatch is refused before credential or checkout mutation. If the retained two-day token expired, `vps_create.sh` asks for and validates a replacement while preserving the checkout and branch. A protected replacement journal records both credential values until the old one is revoked. Use `./vps_destroy.sh --instance <instance-id>` to abandon the setup.
 
 The GitHub prompt creates a fine-grained PAT. Verify that it:
 
@@ -165,8 +173,8 @@ If allocation was interrupted before DigitalOcean returned an ID, both scripts r
 One configuration is a reusable infrastructure profile. Create as many independent instances of that profile as needed, including instances based on different repositories or base branches:
 
 ```bash
-./vps_create.sh --new mattcurf/frontend,main
-./vps_create.sh --new mattcurf/backend,develop
+./vps_create.sh --new example-org/frontend,main
+./vps_create.sh --new example-org/backend,develop
 ```
 
 Each invocation prints its generated instance ID before allocating and again in the final connection summary. Instances receive separate Droplets, repository sources, generated work branches, credentials, SSH files, and lifecycle locks beneath `.state/instances/<instance-id>/`. `vps_list.sh` includes each instance's persisted repository and base branch.
@@ -186,7 +194,7 @@ Open a shell on one instance:
 Resume one instance after interruption or reboot:
 
 ```bash
-./vps_create.sh --instance worker-20260726-120000-12345-6789 mattcurf/frontend,main
+./vps_create.sh --instance worker-20260726-120000-12345-6789 example-org/frontend,main
 ```
 
 Destroy that exact instance:
@@ -198,14 +206,8 @@ Destroy that exact instance:
 You may also choose a memorable ID instead of generating one; the same command creates it when absent and resumes it when present:
 
 ```bash
-./vps_create.sh --instance frontend-a mattcurf/frontend,main
-./vps_create.sh --instance backend-a mattcurf/backend,develop
+./vps_create.sh --instance frontend-a example-org/frontend,main
+./vps_create.sh --instance backend-a example-org/backend,develop
 ```
 
 `vps_create.sh` always requires `--new` or `--instance` plus exactly one repository/base-branch argument. `vps_destroy.sh` always requires only `--instance`, because the instance state records the exact Droplet and credential to remove. There is no unscoped single-instance state or bare destroy operation.
-
-## Operational hardening
-
-For repeated or unattended use, add an external TTL reaper in a separate trusted environment. It should enumerate resources tagged `codex-agent` and delete expired or orphaned Droplets. Local shell traps cannot clean up after laptop failure, network loss, or a killed process.
-
-Also consider replacing first-use SSH host-key acceptance with an SSH host CA. If this workflow grows beyond a small number of short-lived workers, replace manually created fine-grained PATs with a GitHub App and a trusted token broker; GitHub App installation tokens expire after one hour and cannot be issued with a two-day lifetime.
