@@ -70,6 +70,7 @@ jobs:
           version: v0.72.0
       - name: Upload SARIF in trusted context
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true # Code scanning may be disabled; scan gates above remain blocking.
         uses: github/codeql-action/upload-sarif@3c3833e0f8c1c83d449a7478aa59c036a9165498 # v3.28.17
         with:
           sarif_file: trivy.sarif
