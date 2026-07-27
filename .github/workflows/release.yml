@@ -257,4 +257,4 @@ jobs:
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create '${{ github.ref_name }}' dist/* --verify-tag --generate-notes --title '${{ github.ref_name }}'
+        run: gh release create '${{ github.ref_name }}' dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title '${{ github.ref_name }}'
