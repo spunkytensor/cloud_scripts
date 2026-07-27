@@ -40,6 +40,14 @@ cargo build --locked --release
 
 The executable calls the DigitalOcean REST API directly. Normal operation does not require `doctl`, local `gh`, or local `jq`. When available, `doctl` can provide the SSH-key default during first-run setup. OpenSSH is required for worker setup and interactive shells.
 
+The downloadable macOS binary is not currently code-signed or notarized. After verifying the release checksum and confirming that you trust the download, remove Apple's quarantine attribute from the installed executable:
+
+```bash
+xattr -d com.apple.quarantine /path/to/vps
+```
+
+Run the command against the actual installed binary, such as `/usr/local/bin/vps`. Removing quarantine bypasses Gatekeeper's malware-verification prompt for that file, so do not use this workaround on an unverified download.
+
 ## Configure
 
 `vps` initializes itself on first use. If the selected VPS home or its `vps.toml` is missing, run any command from an interactive terminal—for example:
