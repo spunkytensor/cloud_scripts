@@ -170,6 +170,7 @@ jobs:
       - name: Generate CycloneDX SBOM from locked release dependencies
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          cache: 'false'
           scan-type: fs
           scan-ref: .
           scanners: vuln
@@ -182,6 +183,7 @@ jobs:
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          cache: 'false'
           scan-type: fs
           scan-ref: .
           scanners: vuln
@@ -196,6 +198,7 @@ jobs:
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          cache: 'false'
           scan-type: sbom
           scan-ref: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
           format: table
