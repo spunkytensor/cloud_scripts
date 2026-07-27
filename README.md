@@ -4,7 +4,7 @@
   <img src="logo.jpg" width="280" alt="VPS logo: a terminal window and networked letter A over a wireframe cloud">
 </p>
 
-`vps` is a Rust control plane for disposable DigitalOcean development workers. Each worker gets an isolated Ubuntu machine, one repository checkout, a repository-scoped GitHub credential, Docker access, and persistent Codex remote control.
+`vps` is a utility to manage DigitalOcean development workers. Each worker gets an isolated Ubuntu machine, one repository checkout, a repository-scoped GitHub credential, Docker access, and persistent Codex remote control.
 
 ## Motivation
 
