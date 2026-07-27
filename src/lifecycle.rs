@@ -16,6 +16,10 @@ use std::{
 };
 use uuid::Uuid;
 
+const SERVER_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const GRACEFUL_SHUTDOWN_STATUS_ATTEMPTS: usize = 15;
+const FORCED_POWER_OFF_STATUS_ATTEMPTS: usize = 60;
+
 pub struct ControlPlane<'a> {
     pub store: &'a Store,
     pub config: &'a Config,
@@ -367,6 +371,7 @@ impl ControlPlane<'_> {
             }
             if matches!(i.lifecycle, Lifecycle::SourceReserved { .. }) {
                 let d = &self.config.backends.digitalocean;
+                let ssh_key = self.backend.resolve_ssh_key(d.ssh_key.as_deref()).await?;
                 let correlation = format!("vps-{}", Uuid::new_v4());
                 let mut tags = d.tags.clone();
                 tags.push(correlation.clone());
@@ -377,9 +382,7 @@ impl ControlPlane<'_> {
                         size: d.size.clone(),
                         image: d.image.clone(),
                         tags,
-                        ssh_key: d.ssh_key.clone().ok_or_else(|| {
-                            Error::Cli("DigitalOcean SSH key is not configured".into())
-                        })?,
+                        ssh_key,
                     },
                     correlation,
                     request_intent: false,
@@ -405,10 +408,7 @@ impl ControlPlane<'_> {
             return Ok(i);
         }
         let d = &self.config.backends.digitalocean;
-        let ssh_key = d
-            .ssh_key
-            .clone()
-            .ok_or_else(|| Error::Cli("DigitalOcean SSH key is not configured".into()))?;
+        let ssh_key = self.backend.resolve_ssh_key(d.ssh_key.as_deref()).await?;
         let correlation = format!("vps-{}", Uuid::new_v4());
         let mut tags = d.tags.clone();
         tags.push(correlation.clone());
@@ -635,6 +635,10 @@ else git switch "$work"; fi
                 .finish_pause_delete(id, i, existing.unwrap(), options)
                 .await;
         }
+        let ssh_key = self
+            .backend
+            .resolve_ssh_key(self.config.backends.digitalocean.ssh_key.as_deref())
+            .await?;
         console::pending("Provider", "Verifying the active Droplet");
         let current = self.backend.get_server(&server.id).await?.ok_or_else(|| {
             if options.confirm_missing_server {
@@ -729,12 +733,13 @@ VPS_PAUSE"#,
                 )
                 .await?;
             self.backend.wait_action(&a).await?;
+            console::pending("Provider", "Waiting for the Droplet to report powered off");
             let refreshed = self
-                .backend
-                .get_server(&server.id)
+                .wait_for_server_status(&server.id, "off", GRACEFUL_SHUTDOWN_STATUS_ATTEMPTS)
                 .await?
                 .ok_or_else(|| Error::Uncertain("server disappeared during shutdown".into()))?;
             if refreshed.status != "off" {
+                console::pending("Provider", "Graceful shutdown timed out; forcing power off");
                 let power = self
                     .continue_power_off(
                         &mut t,
@@ -744,12 +749,17 @@ VPS_PAUSE"#,
                     )
                     .await?;
                 self.backend.wait_action(&power).await?;
-                let powered = self.backend.get_server(&server.id).await?.ok_or_else(|| {
-                    Error::Uncertain("server disappeared during hard power-off".into())
-                })?;
+                console::pending("Provider", "Waiting for the Droplet to report powered off");
+                let powered = self
+                    .wait_for_server_status(&server.id, "off", FORCED_POWER_OFF_STATUS_ATTEMPTS)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::Uncertain("server disappeared during hard power-off".into())
+                    })?;
                 if powered.status != "off" {
                     return Err(Error::Uncertain(
-                        "hard power-off completed but server is not off".into(),
+                        "hard power-off completed but the Droplet did not report powered off before the status timeout"
+                            .into(),
                     ));
                 }
             }
@@ -814,13 +824,7 @@ VPS_PAUSE"#,
             size: server.size.clone(),
             image: server.image.clone(),
             tags: server.tags.clone(),
-            ssh_key: self
-                .config
-                .backends
-                .digitalocean
-                .ssh_key
-                .clone()
-                .ok_or_else(|| Error::Cli("SSH key missing".into()))?,
+            ssh_key,
         });
         t.snapshot = Some(snap.clone());
         t.phase = Phase::PausingDeletePending;
@@ -864,6 +868,28 @@ VPS_PAUSE"#,
             "Source Droplet deleted; compute billing stopped",
         );
         Ok(i)
+    }
+
+    async fn wait_for_server_status(
+        &self,
+        id: &str,
+        expected: &str,
+        attempts: usize,
+    ) -> Result<Option<Server>> {
+        let mut current = None;
+        for attempt in 0..attempts {
+            current = self.backend.get_server(id).await?;
+            if current
+                .as_ref()
+                .is_none_or(|server| server.status == expected)
+            {
+                return Ok(current);
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(SERVER_STATUS_POLL_INTERVAL).await;
+            }
+        }
+        Ok(current)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1071,7 +1097,6 @@ VPS_PAUSE"#,
             }
             _ => snap.clone(),
         };
-        let d = &self.config.backends.digitalocean;
         let correlation = format!("vps-resume-{}", Uuid::new_v4());
         let source_recipe = snap
             .source_recipe
@@ -1094,16 +1119,24 @@ VPS_PAUSE"#,
             snap.min_disk_gb,
         )?;
         console::success("Snapshot", "Recovery snapshot verified");
+        let ssh_key = match existing
+            .as_ref()
+            .and_then(|transition| transition.target_recipe.as_ref())
+        {
+            Some(recipe) => recipe.ssh_key.clone(),
+            None => {
+                self.backend
+                    .resolve_ssh_key(self.config.backends.digitalocean.ssh_key.as_deref())
+                    .await?
+            }
+        };
         let mut recipe = CreateRecipe {
             name: source_recipe.name,
             region: source_recipe.region,
             size: source_recipe.size,
             image: snap.id.clone(),
             tags: source_recipe.tags,
-            ssh_key: d
-                .ssh_key
-                .clone()
-                .ok_or_else(|| Error::Cli("SSH key missing".into()))?,
+            ssh_key,
         };
         recipe.tags.push(correlation.clone());
         let mut t = existing.unwrap_or(Transition {

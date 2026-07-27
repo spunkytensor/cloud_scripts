@@ -13,10 +13,20 @@ pub enum Output {
 pub struct Cli {
     #[arg(long, global = true, default_value = "digitalocean")]
     pub backend: String,
-    #[arg(long, global = true, env = "VPS_CONFIG")]
+    #[arg(
+        long,
+        global = true,
+        env = "VPS_CONFIG",
+        help = "Configuration file [default: ~/.vps/vps.toml]"
+    )]
     pub config: Option<PathBuf>,
-    #[arg(long, global = true)]
-    pub state_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        env = "VPS_HOME",
+        help = "VPS home containing vps.toml and state/ [default: ~/.vps]"
+    )]
+    pub home: Option<PathBuf>,
     #[arg(long, global = true, value_enum, default_value = "table")]
     pub output: Output,
     #[arg(long, global = true)]
@@ -28,10 +38,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Create {
-        #[arg(long, conflicts_with = "instance")]
-        new: bool,
         #[arg(long)]
-        instance: Option<String>,
+        name: Option<String>,
         repository: String,
         #[arg(long, default_value = "main")]
         branch: String,

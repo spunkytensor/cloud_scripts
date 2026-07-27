@@ -18,6 +18,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Toml(#[from] toml::de::Error),
+    #[error("{0}")]
+    TomlSerialize(#[from] toml::ser::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -26,7 +28,11 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Cli(_) => 2,
-            Self::State(_) | Self::Io(_) | Self::Json(_) | Self::Toml(_) => 3,
+            Self::State(_)
+            | Self::Io(_)
+            | Self::Json(_)
+            | Self::Toml(_)
+            | Self::TomlSerialize(_) => 3,
             Self::Uncertain(_) => 4,
             Self::Remote(_) => 5,
             Self::Backend(_) => 4,

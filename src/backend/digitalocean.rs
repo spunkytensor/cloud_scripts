@@ -182,6 +182,13 @@ impl Backend for DigitalOcean {
             .ok_or_else(|| Error::Backend("droplet access check returned no response".into()))
             .map(|_| ())
     }
+    async fn ssh_keys(&self) -> Result<Vec<String>> {
+        self.pages("/account/keys?per_page=200".into(), "ssh_keys")
+            .await?
+            .iter()
+            .map(|key| id(&key["id"]))
+            .collect()
+    }
     async fn create_server(
         &self,
         r: &CreateRecipe,

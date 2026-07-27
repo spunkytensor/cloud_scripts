@@ -14,8 +14,10 @@ use vps_control_plane::{
 #[derive(Default)]
 struct CountingBackend {
     servers: Mutex<Vec<Server>>,
+    server_statuses: Mutex<Vec<String>>,
     actions: Mutex<Vec<Action>>,
     snapshots: Mutex<Vec<Snapshot>>,
+    ssh_keys: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -80,6 +82,9 @@ impl Backend for CountingBackend {
     async fn validate_access(&self) -> Result<()> {
         Ok(())
     }
+    async fn ssh_keys(&self) -> Result<Vec<String>> {
+        Ok(self.ssh_keys.lock().unwrap().clone())
+    }
     async fn create_server(&self, _: &CreateRecipe, _: Option<&str>) -> Result<Mutation<Server>> {
         self.calls.lock().unwrap().push("create".into());
         unreachable!()
@@ -96,13 +101,20 @@ impl Backend for CountingBackend {
             .collect())
     }
     async fn get_server(&self, id: &str) -> Result<Option<Server>> {
-        Ok(self
+        let mut found = self
             .servers
             .lock()
             .unwrap()
             .iter()
             .find(|s| s.id == id)
-            .cloned())
+            .cloned();
+        let mut statuses = self.server_statuses.lock().unwrap();
+        if let Some(server) = &mut found
+            && !statuses.is_empty()
+        {
+            server.status = statuses.remove(0);
+        }
+        Ok(found)
     }
     async fn delete_server(&self, id: &str) -> Result<Mutation<()>> {
         self.calls
@@ -195,15 +207,15 @@ fn config_expands_tilde_in_ssh_private_key() {
     let path = d.path().join("vps.toml");
     fs::write(
         &path,
-        "version = 1\n[ssh]\nprivate_key = \"~/.ssh/id_digitalocean_v2\"\n",
+        "version = 1\n[ssh]\nprivate_key = \"~/.ssh/id_digitalocean\"\n",
     )
     .unwrap();
 
-    let (config, _) = Config::load(Some(&path), Some(d.path().join("state"))).unwrap();
+    let (config, _) = Config::load(Some(&path), Some(d.path().join("home"))).unwrap();
 
     assert_eq!(
         config.ssh.private_key.unwrap(),
-        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".ssh/id_digitalocean_v2")
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".ssh/id_digitalocean")
     );
 }
 
@@ -302,8 +314,8 @@ async fn source_reserved_create_is_persisted_as_fresh_allocation_not_success() {
         .save(&instance(Lifecycle::SourceReserved { recipe: recipe() }))
         .unwrap();
     let backend = CountingBackend::default();
+    backend.ssh_keys.lock().unwrap().push("only-key".into());
     let mut cfg = Config::default();
-    cfg.backends.digitalocean.ssh_key = Some("configured-key".into());
     cfg.ssh.private_key = Some(d.path().join("missing-key"));
     let result = ControlPlane {
         store: &store,
@@ -322,7 +334,7 @@ async fn source_reserved_create_is_persisted_as_fresh_allocation_not_success() {
     else {
         panic!("source reservation was not converted")
     };
-    assert_eq!(recipe.ssh_key, "configured-key");
+    assert_eq!(recipe.ssh_key, "only-key");
     assert!(recipe.tags.contains(&correlation));
     assert!(!request_intent);
 }
@@ -367,7 +379,7 @@ fn snapshot_validation_uses_region_membership_and_source_disk_direction() {
 }
 
 #[tokio::test]
-async fn persisted_shutdown_and_snapshot_intents_are_reconciled() {
+async fn persisted_shutdown_waits_for_eventually_consistent_server_status() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().into());
     let s = server("1");
@@ -415,6 +427,7 @@ async fn persisted_shutdown_and_snapshot_intents_are_reconciled() {
         .unwrap();
     let backend = CountingBackend::default();
     *backend.servers.lock().unwrap() = vec![s];
+    *backend.server_statuses.lock().unwrap() = vec!["active".into(), "active".into(), "off".into()];
     *backend.actions.lock().unwrap() = vec![
         Action {
             id: "a".into(),
@@ -451,6 +464,7 @@ async fn persisted_shutdown_and_snapshot_intents_are_reconciled() {
             .iter()
             .any(|c| c.starts_with("action:"))
     );
+    assert!(backend.server_statuses.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

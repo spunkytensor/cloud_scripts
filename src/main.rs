@@ -31,7 +31,7 @@ async fn run() -> Result<()> {
         clap_complete::generate(*shell, &mut c, "vps", &mut io::stdout());
         return Ok(());
     }
-    let (cfg, root) = Config::load(cli.config.as_deref(), cli.state_dir.clone())?;
+    let (cfg, root) = Config::load(cli.config.as_deref(), cli.home.clone())?;
     let store = Store::new(root.clone());
     if matches!(
         cli.command,
@@ -47,20 +47,17 @@ async fn run() -> Result<()> {
     };
     match cli.command {
         Commands::Create {
-            new,
-            instance,
+            name,
             repository,
             branch,
         } => {
-            let id = instance
-                .or_else(|| new.then(generated_id))
-                .ok_or_else(|| Error::Cli("create requires --new or --instance".into()))?;
+            let id = name.unwrap_or_else(generated_id);
             show(
                 &life.create(id, repository, branch).await?,
                 cli.output,
                 cli.verbose,
                 cli.config.as_deref(),
-                cli.state_dir.as_deref(),
+                cli.home.as_deref(),
             )?
         }
         Commands::Pause {
@@ -80,7 +77,7 @@ async fn run() -> Result<()> {
             cli.output,
             cli.verbose,
             cli.config.as_deref(),
-            cli.state_dir.as_deref(),
+            cli.home.as_deref(),
         )?,
         Commands::Resume {
             instance,
@@ -99,7 +96,7 @@ async fn run() -> Result<()> {
             cli.output,
             cli.verbose,
             cli.config.as_deref(),
-            cli.state_dir.as_deref(),
+            cli.home.as_deref(),
         )?,
         Commands::Destroy {
             instance,
@@ -128,6 +125,9 @@ async fn run() -> Result<()> {
         Commands::Doctor => {
             console::pending("Doctor", "Checking DigitalOcean API access");
             backend.validate_access().await?;
+            backend
+                .resolve_ssh_key(cfg.backends.digitalocean.ssh_key.as_deref())
+                .await?;
             console::success("Doctor", "Configuration and DigitalOcean access verified");
             if cli.verbose {
                 println!("  State directory  {}", root.display());
@@ -143,7 +143,7 @@ async fn run() -> Result<()> {
                 cli.output,
                 cli.verbose,
                 cli.config.as_deref(),
-                cli.state_dir.as_deref(),
+                cli.home.as_deref(),
             )?
         }
         Commands::List { .. }
@@ -230,7 +230,7 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
                 cli.output,
                 cli.verbose,
                 cli.config.as_deref(),
-                cli.state_dir.as_deref(),
+                cli.home.as_deref(),
             )?
         }
         Commands::Shell { instance } => {
@@ -359,7 +359,7 @@ fn show(
     output: Output,
     verbose: bool,
     config: Option<&Path>,
-    state_dir: Option<&Path>,
+    home: Option<&Path>,
 ) -> Result<()> {
     if output == Output::Json {
         println!("{}", serde_json::to_string_pretty(i)?);
@@ -371,7 +371,7 @@ fn show(
     if status == "active" {
         println!(
             "  Connect         {}",
-            shell_command(&i.instance_id, config, state_dir)
+            shell_command(&i.instance_id, config, home)
         );
     }
     if !verbose {
@@ -391,14 +391,14 @@ fn show(
     }
     Ok(())
 }
-fn shell_command(id: &str, config: Option<&Path>, state_dir: Option<&Path>) -> String {
+fn shell_command(id: &str, config: Option<&Path>, home: Option<&Path>) -> String {
     let mut command = String::from("vps shell");
     if let Some(path) = config {
         command.push_str(" --config ");
         command.push_str(&shell_arg(path));
     }
-    if let Some(path) = state_dir {
-        command.push_str(" --state-dir ");
+    if let Some(path) = home {
+        command.push_str(" --home ");
         command.push_str(&shell_arg(path));
     }
     command.push(' ');

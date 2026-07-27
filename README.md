@@ -1,5 +1,9 @@
 # Disposable cloud Codex workers
 
+<p align="center">
+  <img src="logo.jpg" width="280" alt="VPS logo: a terminal window and networked letter A over a wireframe cloud">
+</p>
+
 `vps` is a Rust control plane for disposable DigitalOcean development workers. Each worker gets an isolated Ubuntu machine, one repository checkout, a repository-scoped GitHub credential, Docker access, and persistent Codex remote control.
 
 ## Motivation
@@ -12,10 +16,12 @@ This project moves agent-driven development off the developer's laptop and onto 
 
 **Give every copy its own operating system.** Each worker boots from a clean Ubuntu image provisioned by the same cloud-init asset. Every copy can bind conventional ports, run its own databases and containers, and install system packages without coordinating with another agent. Damage is contained to one disposable machine; recovery is pause/resume or teardown rather than repairing a shared host.
 
+**Note:** Some AI coding tools are already adding built-in support for remotely hosted agents, which may provide a more refined and easier-to-use experience. See Amp's [Agents in Orbs](https://ampcode.com/news/agents-in-orbs for one such example).
+
 ## Security and cost model
 
-- A Droplet remains billable until `vps destroy` or `vps pause` confirms its deletion. Powering it off is not enough.
-- `vps pause` is a cold suspend. It quiesces the worker, snapshots the boot disk, and deletes the Droplet. Compute billing stops after confirmed deletion, but private snapshot storage remains billable.
+- A Droplet remains billable until `vps destroy` or `vps pause` confirms its deletion. 
+- `vps pause` is a cold suspend. It quiesces the worker, snapshots the boot disk, and deletes the Droplet. Compute billing stops after confirmed deletion (private snapshot storage remains billable, but is much less expensive).
 - A paused snapshot contains the checkout, databases, GitHub PAT, and ChatGPT login. Treat it as a credential-bearing private machine image; never share or publish it. Normal resume and destroy remove it.
 - Each instance uses a dedicated fine-grained GitHub PAT restricted to its repository. The worker keeps that credential for Git and `gh`; the control machine retains a mode-`0600` copy so teardown can revoke it if the worker is unreachable.
 - Repository code running as `agent` can read the worker's GitHub and ChatGPT credentials and has root-equivalent control through the Docker socket. Use only repositories and dependencies you trust.
@@ -34,58 +40,38 @@ cargo build --locked --release
 ./target/release/vps --help
 ```
 
-The executable calls the DigitalOcean REST API directly. It does not require `doctl`, local `gh`, or local `jq`. OpenSSH is required for worker setup and interactive shells.
+The executable calls the DigitalOcean REST API directly. Normal operation does not require `doctl`, local `gh`, or local `jq`. When available, `doctl` can provide the SSH-key default during first-run setup. OpenSSH is required for worker setup and interactive shells.
 
 ## Configure
 
-Copy the native TOML example and edit it:
+`vps` initializes itself on first use. If the selected VPS home or its `vps.toml` is missing, run any command from an interactive terminal—for example:
 
 ```bash
-cp vps.example.toml vps.toml
-$EDITOR vps.toml
+vps list
 ```
 
-At minimum, set the private SSH key path and the matching DigitalOcean SSH key ID or fingerprint:
+The setup sequence asks for:
 
-```toml
-version = 1
-default_backend = "digitalocean"
+- the private SSH key path;
+- Git author name and email, pre-populated from `git config user.name` and `git config user.email` when available;
+- the matching DigitalOcean SSH key ID or fingerprint, pre-populated when `doctl` reports exactly one account key;
+- DigitalOcean region, size, image, tags, and Droplet name prefix.
 
-[ssh]
-private_key = "~/.ssh/id_digitalocean_v2"
+Press Enter to accept each displayed default. Setup creates `~/.vps` with mode `0700` and writes the populated configuration to `~/.vps/vps.toml` with mode `0600`. 
 
-[git]
-author_name = "Codex VPS Agent"
-author_email = "codex-vps-agent@users.noreply.github.com"
+With multiple account keys, setup displays their IDs, fingerprints, and names so you can choose one at the prompt. With no keys, or when `doctl` is unavailable or unauthenticated, setup leaves the SSH-key choice for you to enter. To list the same information manually when `doctl` is installed:
 
-[backends.digitalocean]
-ssh_key = "digitalocean-key-id-or-fingerprint"
-region = "nyc3"
-size = "s-4vcpu-8gb"
-image = "ubuntu-24-04-x64"
-tags = ["codex-agent"]
-name_prefix = "codex-agent"
+```bash
+doctl compute ssh-key list --format ID,FingerPrint,Name
 ```
 
 The public key must exist beside the private key with a `.pub` suffix. If the private key is encrypted, load it into your SSH agent before creating a worker:
 
 ```bash
-ssh-add --apple-use-keychain ~/.ssh/id_digitalocean_v2
+ssh-add --apple-use-keychain ~/.ssh/id_digitalocean
 ```
 
-Select the configuration with `--config` or `VPS_CONFIG`:
-
-```bash
-export VPS_CONFIG="$PWD/vps.toml"
-```
-
-Set the cloud token in the process environment. Tokens are not accepted in TOML:
-
-```bash
-export DIGITALOCEAN_TOKEN='...'
-```
-
-State defaults to the platform state directory. An existing repository-local `.state/instances` directory remains discoverable so ownership records for active resources are not abandoned. Use `state_dir` in TOML or the global `--state-dir` option when an explicit location is required. State directories contain credentials and are created with mode `0700`; secret files use mode `0600`.
+First-run setup requires an interactive terminal and never stores DigitalOcean or GitHub tokens.
 
 ### Minimum DigitalOcean token scopes
 
@@ -99,7 +85,7 @@ Create a custom-scoped DigitalOcean personal access token and enable every entit
 | Regions | `regions:read` | Resolve eligible regions. Required by the Droplet create/delete scopes and by `snapshot:delete`. |
 | Sizes | `sizes:read` | Resolve eligible Droplet sizes. Required by the Droplet create/delete scopes and by `snapshot:delete`. |
 | Snapshots | `snapshot:read`, `snapshot:delete` | Verify and remove private recovery snapshots. `snapshot:read` is required by `snapshot:delete`. |
-| SSH keys | `ssh_key:read` | Add the configured SSH key to new Droplets. |
+| SSH keys | `ssh_key:read` | Discover the sole account key when none is configured and add the selected key to new Droplets. It also permits the optional `doctl compute ssh-key list` reference command above. |
 | Tags | `tag:create`, `tag:read` | Apply configured tags during creation. `tag:read` is required by `tag:create`. |
 | VPCs | `vpc:read` | Satisfy the additional dependency enforced by DigitalOcean's token-creation UI. |
 
@@ -115,16 +101,16 @@ vps doctor
 
 ### Create a worker
 
-Generate a new instance ID:
+Generate a new name automatically:
 
 ```bash
-vps create --new example-org/testrepo --branch main
+vps create example-org/testrepo --branch main
 ```
 
-Or choose a stable ID:
+Or choose a stable name:
 
 ```bash
-vps create --instance frontend-a example-org/testrepo --branch main
+vps create --name frontend-a example-org/testrepo --branch main
 ```
 
 Creation:
@@ -137,7 +123,7 @@ Creation:
 
 The pre-filled GitHub PAT form requests a two-day expiry, access only to the selected repository, `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`. Confirm any organization approval requirement before continuing. Pasted token input is not echoed.
 
-If creation is interrupted, rerun the same `create --instance ...` command with the same repository and base branch. The persisted journal reconciles the existing allocation instead of blindly creating another Droplet. Use `vps destroy <instance>` to abandon an incomplete setup.
+Creation prints its generated or selected name before allocation begins. If creation is interrupted, rerun with `create --name <name> ...`, using that same name, repository, and base branch. The persisted journal reconciles the existing allocation instead of blindly creating another Droplet. Use `vps destroy <instance>` to abandon an incomplete setup.
 
 ### Inspect and connect
 
@@ -161,7 +147,7 @@ vps resume frontend-a
 vps shell frontend-a
 ```
 
-Pause is a cold boot cycle, not a RAM suspend. Running processes are lost. Before shutdown, `vps` stops Codex remote control, records running and healthy Docker containers, gracefully stops them, runs `sync`, captures the SSH host key, powers off the Droplet, creates and verifies a private boot-disk snapshot, and deletes the source Droplet.
+Pause is a cold boot cycle, not a RAM suspend. Running processes are lost. Before shutdown, `vps` stops Codex remote control, records running and healthy Docker containers, gracefully stops them, runs `sync`, captures the SSH host key, powers off the Droplet, creates and verifies a private boot-disk snapshot, and deletes the source Droplet. After a completed shutdown action, it polls the Droplet resource until the provider reports it powered off, tolerating normal status propagation delay before snapshotting.
 
 Do not pause while another operator or process is writing through SSH. The lifecycle lock serializes `vps` commands but cannot stop an unrelated shell from changing the disk. Attached DigitalOcean block-storage volumes are rejected because a Droplet snapshot does not include them; Docker volumes stored on the boot disk are preserved.
 
@@ -204,8 +190,8 @@ Use `--forget-unresolved-allocation` only after independently confirming that no
 One TOML file is a reusable infrastructure profile. Each instance receives its own Droplet, checkout, `codex/<instance-id>` branch, GitHub credential, known-hosts file, lifecycle journal, and lock.
 
 ```bash
-vps create --instance frontend-a example-org/frontend --branch main
-vps create --instance backend-a example-org/backend --branch develop
+vps create --name frontend-a example-org/frontend --branch main
+vps create --name backend-a example-org/backend --branch develop
 vps list
 vps shell frontend-a
 vps pause backend-a
