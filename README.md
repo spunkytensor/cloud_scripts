@@ -10,13 +10,13 @@
 
 This project moves agent-driven development off the developer's laptop and onto one disposable machine per unit of work.
 
-**Keep the agent off the developer machine.** A coding agent can run arbitrary commands, install dependencies, execute repository code, and access the credentials available to its process. That is a poor fit for a laptop containing personal files, cloud credentials, SSH keys, and unrelated client work. A worker receives only the checkout and credentials needed for one repository. The DigitalOcean token remains on the control machine and is never copied to the worker.
+- **Keep the agent off the developer machine.** A coding agent can run arbitrary commands, install dependencies, execute repository code, and access the credentials available to its process. That is a poor fit for a laptop containing personal files, cloud credentials, SSH keys, and unrelated client work. A worker receives only the checkout and credentials needed for one repository. The DigitalOcean token remains on the control machine and is never copied to the worker.
 
-**Run work in parallel instead of in series.** Independent workers do not contend for one checkout, one Docker daemon, one dependency tree, or the same ports. Separate features, repositories, experiments, and long-running migrations can proceed at the same time. Throughput is limited by what you are willing to pay for and supervise rather than by one local machine.
+- **Run work in parallel instead of in series.** Independent workers do not contend for one checkout, one Docker daemon, one dependency tree, or the same ports. Separate features, repositories, experiments, and long-running migrations can proceed at the same time. Throughput is limited by what you are willing to pay for and supervise rather than by one local machine.
 
-**Give every copy its own operating system.** Each worker boots from a clean Ubuntu image provisioned by the same cloud-init asset. Every copy can bind conventional ports, run its own databases and containers, and install system packages without coordinating with another agent. Damage is contained to one disposable machine; recovery is pause/resume or teardown rather than repairing a shared host.
+- **Give every copy its own operating system.** Each worker boots from a clean Ubuntu image provisioned by the same cloud-init asset. Every copy can bind conventional ports, run its own databases and containers, and install system packages without coordinating with another agent. Damage is contained to one disposable machine; recovery is pause/resume or teardown rather than repairing a shared host.
 
-**Note:** Some AI coding tools are already adding built-in support for remotely hosted agents, which may provide a more refined and easier-to-use experience. See Amp's [Agents in Orbs](https://ampcode.com/news/agents-in-orbs for one such example).
+**Note:** Some AI coding tools are already adding built-in support for remotely hosted agents, which may provide a more refined and easier-to-use experience. See Amp's [Agents in Orbs](https://ampcode.com/news/agents-in-orbs) for one such example.
 
 ## Security and cost model
 
@@ -29,8 +29,6 @@ This project moves agent-driven development off the developer's laptop and onto 
 - Initial SSH bootstrap uses trust on first use with an instance-specific known-hosts file. This does not protect the first connection from an active network attacker.
 
 ## Install
-
-Tagged releases publish checksummed archives for macOS arm64 and Windows x64 plus Ubuntu amd64 `.deb` packages. Release assets include shell completions, third-party notices, CycloneDX SBOMs, and build provenance.
 
 To build from source, install Rust 1.96.1 and OpenSSH, then run:
 
@@ -209,3 +207,9 @@ source <(vps completion zsh)
 ```
 
 Run `vps completion --help` for the supported shells.
+
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development, testing, pull-request, security-reporting, and contribution-licensing policy.
+
+Copyright 2026 Matt Curfman. Licensed under the [Apache License, Version 2.0](LICENSE).

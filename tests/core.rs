@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use async_trait::async_trait;
 use std::{fs, sync::Mutex};
 use tempfile::tempdir;
@@ -28,9 +31,11 @@ struct RejectingBackend {
 
 #[async_trait]
 impl Backend for RejectingBackend {
+    /// Simulates successful provider credential validation.
     async fn validate_access(&self) -> Result<()> {
         Ok(())
     }
+    /// Confirms allocation intent was persisted before simulating a rejected create request.
     async fn create_server(&self, _: &CreateRecipe, _: Option<&str>) -> Result<Mutation<Server>> {
         let saved = Store::new(self.state_root.clone()).load("x")?;
         assert!(matches!(
@@ -45,33 +50,43 @@ impl Backend for RejectingBackend {
             diagnostic: "invalid recipe".into(),
         })
     }
+    /// Simulates a correlation lookup with no matching servers.
     async fn find_servers(&self, _: &str) -> Result<Vec<Server>> {
         Ok(vec![])
     }
+    /// Simulates a provider-confirmed missing server.
     async fn get_server(&self, _: &str) -> Result<Option<Server>> {
         Ok(None)
     }
+    /// Marks server deletion as unexpected for rejection tests.
     async fn delete_server(&self, _: &str) -> Result<Mutation<()>> {
         unreachable!()
     }
+    /// Marks action creation as unexpected for rejection tests.
     async fn action(&self, _: &str, _: &str, _: Option<&str>) -> Result<Mutation<Action>> {
         unreachable!()
     }
+    /// Simulates a provider-confirmed missing action.
     async fn get_action(&self, _: &str) -> Result<Option<Action>> {
         Ok(None)
     }
+    /// Simulates action correlation with no matches.
     async fn find_actions(&self, _: &str, _: &str, _: &str) -> Result<Vec<Action>> {
         Ok(vec![])
     }
+    /// Marks action polling as unexpected for rejection tests.
     async fn wait_action(&self, _: &Action) -> Result<()> {
         unreachable!()
     }
+    /// Simulates an empty snapshot inventory.
     async fn snapshots(&self) -> Result<Vec<Snapshot>> {
         Ok(vec![])
     }
+    /// Simulates a provider-confirmed missing snapshot.
     async fn get_snapshot(&self, _: &str) -> Result<Option<Snapshot>> {
         Ok(None)
     }
+    /// Marks snapshot deletion as unexpected for rejection tests.
     async fn delete_snapshot(&self, _: &str) -> Result<Mutation<()>> {
         unreachable!()
     }
@@ -79,16 +94,20 @@ impl Backend for RejectingBackend {
 
 #[async_trait]
 impl Backend for CountingBackend {
+    /// Simulates successful provider credential validation.
     async fn validate_access(&self) -> Result<()> {
         Ok(())
     }
+    /// Returns the mock account SSH-key inventory.
     async fn ssh_keys(&self) -> Result<Vec<String>> {
         Ok(self.ssh_keys.lock().unwrap().clone())
     }
+    /// Records an unexpected create request before failing the test.
     async fn create_server(&self, _: &CreateRecipe, _: Option<&str>) -> Result<Mutation<Server>> {
         self.calls.lock().unwrap().push("create".into());
         unreachable!()
     }
+    /// Records the correlation tag and returns mock servers carrying it.
     async fn find_servers(&self, tag: &str) -> Result<Vec<Server>> {
         self.calls.lock().unwrap().push(format!("find:{tag}"));
         Ok(self
@@ -100,6 +119,7 @@ impl Backend for CountingBackend {
             .cloned()
             .collect())
     }
+    /// Returns a mock server and advances its queued eventually consistent status.
     async fn get_server(&self, id: &str) -> Result<Option<Server>> {
         let mut found = self
             .servers
@@ -116,6 +136,7 @@ impl Backend for CountingBackend {
         }
         Ok(found)
     }
+    /// Records and confirms deletion while removing the server from mock inventory.
     async fn delete_server(&self, id: &str) -> Result<Mutation<()>> {
         self.calls
             .lock()
@@ -124,10 +145,12 @@ impl Backend for CountingBackend {
         self.servers.lock().unwrap().retain(|s| s.id != id);
         Ok(Mutation::Confirmed(()))
     }
+    /// Records an unexpected action request before failing the test.
     async fn action(&self, _: &str, kind: &str, _: Option<&str>) -> Result<Mutation<Action>> {
         self.calls.lock().unwrap().push(format!("action:{kind}"));
         unreachable!()
     }
+    /// Returns an action from mock inventory by provider ID.
     async fn get_action(&self, id: &str) -> Result<Option<Action>> {
         Ok(self
             .actions
@@ -137,6 +160,7 @@ impl Backend for CountingBackend {
             .find(|a| a.id == id)
             .cloned())
     }
+    /// Records correlation and returns actions matching resource and kind.
     async fn find_actions(&self, resource: &str, kind: &str, _: &str) -> Result<Vec<Action>> {
         self.calls
             .lock()
@@ -151,12 +175,15 @@ impl Backend for CountingBackend {
             .cloned()
             .collect())
     }
+    /// Simulates an action that has already completed.
     async fn wait_action(&self, _: &Action) -> Result<()> {
         Ok(())
     }
+    /// Returns the complete mock snapshot inventory.
     async fn snapshots(&self) -> Result<Vec<Snapshot>> {
         Ok(self.snapshots.lock().unwrap().clone())
     }
+    /// Returns a snapshot from mock inventory by provider ID.
     async fn get_snapshot(&self, id: &str) -> Result<Option<Snapshot>> {
         Ok(self
             .snapshots
@@ -166,6 +193,7 @@ impl Backend for CountingBackend {
             .find(|s| s.id == id)
             .cloned())
     }
+    /// Records and confirms deletion while removing the snapshot from mock inventory.
     async fn delete_snapshot(&self, id: &str) -> Result<Mutation<()>> {
         self.calls
             .lock()
@@ -175,6 +203,7 @@ impl Backend for CountingBackend {
         Ok(Mutation::Confirmed(()))
     }
 }
+/// Builds the minimal deterministic allocation recipe shared by lifecycle tests.
 fn recipe() -> CreateRecipe {
     CreateRecipe {
         name: "n".into(),
@@ -185,6 +214,7 @@ fn recipe() -> CreateRecipe {
         ssh_key: "k".into(),
     }
 }
+/// Builds an offline mock server with the supplied provider ID.
 fn server(id: &str) -> Server {
     Server {
         id: id.into(),
@@ -200,6 +230,7 @@ fn server(id: &str) -> Server {
     }
 }
 
+/// Configuration expands a tilde-prefixed SSH private-key path against the user home.
 #[cfg(unix)]
 #[test]
 fn config_expands_tilde_in_ssh_private_key() {
@@ -219,6 +250,7 @@ fn config_expands_tilde_in_ssh_private_key() {
     );
 }
 
+/// Builds a valid test instance in the supplied lifecycle state.
 fn instance(lifecycle: Lifecycle) -> Instance {
     Instance {
         schema_version: 1,
@@ -233,6 +265,7 @@ fn instance(lifecycle: Lifecycle) -> Instance {
     }
 }
 
+/// Rerunning an allocation with persisted request intent reconciles instead of creating again.
 #[tokio::test]
 async fn allocation_rerun_never_calls_create() {
     let d = tempdir().unwrap();
@@ -252,13 +285,14 @@ async fn allocation_rerun_never_calls_create() {
         backend: &backend,
     };
     assert!(
-        cp.create("x".into(), "o/r".into(), "main".into())
+        cp.create("digitalocean", "x".into(), "o/r".into(), "main".into())
             .await
             .is_err()
     );
     assert!(!backend.calls.lock().unwrap().iter().any(|c| c == "create"));
 }
 
+/// A rejected create clears request intent but preserves its recipe and correlation for an exact retry.
 #[tokio::test]
 async fn rejected_allocation_is_durably_intended_then_retryable_with_same_recipe() {
     let d = tempdir().unwrap();
@@ -271,7 +305,7 @@ async fn rejected_allocation_is_durably_intended_then_retryable_with_same_recipe
             request_intent: false,
         }))
         .unwrap();
-    fs::write(d.path().join("key.pub"), "ssh-ed25519 test-key\n").unwrap();
+    fs::write(d.path().join("key.pub"), "ssh-ed25519 AAAA test-key\n").unwrap();
     let backend = RejectingBackend {
         state_root: d.path().into(),
         create_calls: Mutex::new(0),
@@ -285,7 +319,7 @@ async fn rejected_allocation_is_durably_intended_then_retryable_with_same_recipe
     };
     for expected_calls in 1..=2 {
         assert!(
-            cp.create("x".into(), "o/r".into(), "main".into())
+            cp.create("digitalocean", "x".into(), "o/r".into(), "main".into())
                 .await
                 .is_err()
         );
@@ -306,6 +340,7 @@ async fn rejected_allocation_is_durably_intended_then_retryable_with_same_recipe
     }
 }
 
+/// Creating from source-reserved state persists a fresh correlated allocation before provisioning.
 #[tokio::test]
 async fn source_reserved_create_is_persisted_as_fresh_allocation_not_success() {
     let d = tempdir().unwrap();
@@ -322,7 +357,7 @@ async fn source_reserved_create_is_persisted_as_fresh_allocation_not_success() {
         config: &cfg,
         backend: &backend,
     }
-    .create("x".into(), "o/r".into(), "main".into())
+    .create("digitalocean", "x".into(), "o/r".into(), "main".into())
     .await;
     assert!(result.is_err());
     let saved = store.load("x").unwrap();
@@ -339,6 +374,7 @@ async fn source_reserved_create_is_persisted_as_fresh_allocation_not_success() {
     assert!(!request_intent);
 }
 
+/// Destroying source-reserved state removes only local state and never contacts the provider.
 #[tokio::test]
 async fn source_reserved_destroy_never_queries_or_deletes_provider() {
     let d = tempdir().unwrap();
@@ -359,6 +395,29 @@ async fn source_reserved_destroy_never_queries_or_deletes_provider() {
     assert!(!store.dir("x").exists());
 }
 
+/// Create rejects an existing instance owned by another backend before provider access.
+#[tokio::test]
+async fn create_rejects_existing_instance_from_another_backend() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().into());
+    let mut existing = instance(Lifecycle::SourceReserved { recipe: recipe() });
+    existing.backend = "other-cloud".into();
+    store.save(&existing).unwrap();
+    let backend = CountingBackend::default();
+
+    let result = ControlPlane {
+        store: &store,
+        config: &Config::default(),
+        backend: &backend,
+    }
+    .create("digitalocean", "x".into(), "o/r".into(), "main".into())
+    .await;
+
+    assert!(result.is_err());
+    assert!(backend.calls.lock().unwrap().is_empty());
+}
+
+/// Snapshot validation accepts any advertised source region and rejects a minimum disk larger than the source.
 #[test]
 fn snapshot_validation_uses_region_membership_and_source_disk_direction() {
     let mut snap = Snapshot {
@@ -378,6 +437,99 @@ fn snapshot_validation_uses_region_membership_and_source_disk_direction() {
     assert!(validate_snapshot(&snap, "9", "snap", "1", "source", 25).is_err());
 }
 
+/// Completed pause and resume journals remain valid until the next lifecycle call clears them.
+#[tokio::test]
+async fn completed_transitions_remain_readable_until_journal_cleanup() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().into());
+    let snap = Snapshot {
+        id: "9".into(),
+        name: "snap".into(),
+        source_id: "1".into(),
+        region: "r".into(),
+        min_disk_gb: 25,
+        host_key: "ssh-ed25519 key".into(),
+        pause_operation_id: "op".into(),
+        source_recipe: Some(recipe()),
+        regions: vec!["r".into()],
+    };
+    let mut checkpoints = Checkpoints {
+        quiescence_verified: true,
+        captured_host_key: Some("ssh-ed25519 key".into()),
+        source_delete_intent: true,
+        source_delete_confirmed: true,
+        ..Default::default()
+    };
+    let transition = Transition {
+        schema_version: 1,
+        kind: TransitionKind::Pause,
+        phase: Phase::PausingDeletePending,
+        operation_id: "op".into(),
+        started_at: now(),
+        checkpoints: checkpoints.clone(),
+        source: Some(server("1")),
+        snapshot: Some(snap.clone()),
+        target_recipe: None,
+        target: None,
+        correlation: None,
+    };
+    store
+        .save(&instance(Lifecycle::Active {
+            server: server("1"),
+            snapshot: None,
+        }))
+        .unwrap();
+    store.save_transition("x", &transition).unwrap();
+    store
+        .save(&instance(Lifecycle::Paused {
+            snapshot: snap.clone(),
+        }))
+        .unwrap();
+    assert!(store.transition("x").unwrap().is_some());
+
+    checkpoints.snapshot_delete_confirmed = true;
+    let resume = Transition {
+        schema_version: 1,
+        kind: TransitionKind::Resume,
+        phase: Phase::ActiveSnapshotCleanupPending,
+        operation_id: "resume-op".into(),
+        started_at: now(),
+        checkpoints,
+        source: None,
+        snapshot: Some(snap),
+        target_recipe: Some(recipe()),
+        target: Some(server("2")),
+        correlation: Some("resume-correlation".into()),
+    };
+    store
+        .save(&instance(Lifecycle::Active {
+            server: server("2"),
+            snapshot: Some(resume.snapshot.clone().unwrap()),
+        }))
+        .unwrap();
+    store.save_transition("x", &resume).unwrap();
+    store
+        .save(&instance(Lifecycle::Active {
+            server: server("2"),
+            snapshot: None,
+        }))
+        .unwrap();
+    assert!(store.transition("x").unwrap().is_some());
+
+    let backend = CountingBackend::default();
+    ControlPlane {
+        store: &store,
+        config: &Config::default(),
+        backend: &backend,
+    }
+    .resume("x", Default::default())
+    .await
+    .unwrap();
+    assert!(store.transition("x").unwrap().is_none());
+    assert!(backend.calls.lock().unwrap().is_empty());
+}
+
+/// A reconciled shutdown action still waits until eventually consistent server status becomes `off`.
 #[tokio::test]
 async fn persisted_shutdown_waits_for_eventually_consistent_server_status() {
     let d = tempdir().unwrap();
@@ -467,12 +619,14 @@ async fn persisted_shutdown_waits_for_eventually_consistent_server_status() {
     assert!(backend.server_statuses.lock().unwrap().is_empty());
 }
 
+/// Destroy confirms deletion of every frozen server before deleting retained snapshots.
 #[tokio::test]
 async fn destroy_deletes_every_server_before_snapshots() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().into());
     let a = server("1");
     let b = server("2");
+    let c = server("3");
     let snap = Snapshot {
         id: "9".into(),
         name: "snap".into(),
@@ -501,6 +655,7 @@ async fn destroy_deletes_every_server_before_snapshots() {
                 started_at: now(),
                 checkpoints: Checkpoints {
                     recovery_verified_at: Some(now()),
+                    teardown_servers: vec![a.clone(), b.clone(), c.clone()],
                     ..Default::default()
                 },
                 source: None,
@@ -512,7 +667,7 @@ async fn destroy_deletes_every_server_before_snapshots() {
         )
         .unwrap();
     let backend = CountingBackend::default();
-    *backend.servers.lock().unwrap() = vec![a, b];
+    *backend.servers.lock().unwrap() = vec![a, b, c];
     *backend.snapshots.lock().unwrap() = vec![snap];
     ControlPlane {
         store: &store,
@@ -532,10 +687,132 @@ async fn destroy_deletes_every_server_before_snapshots() {
             .iter()
             .filter(|c| c.starts_with("delete-server"))
             .count(),
-        2
+        3
     );
 }
 
+/// Retrying a started destroy uses its frozen server inventory without another correlation lookup.
+#[tokio::test]
+async fn destroy_retry_uses_frozen_inventory_without_reresolving_correlations() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().into());
+    let allocated = server("1");
+    store
+        .save(&instance(Lifecycle::AllocationPending {
+            recipe: recipe(),
+            correlation: "create-correlation".into(),
+            request_intent: true,
+        }))
+        .unwrap();
+    store
+        .save_transition(
+            "x",
+            &Transition {
+                schema_version: 1,
+                kind: TransitionKind::Destroy,
+                phase: Phase::Destroying,
+                operation_id: "destroy-op".into(),
+                started_at: now(),
+                checkpoints: Checkpoints {
+                    teardown_started: true,
+                    teardown_servers: vec![allocated.clone()],
+                    ..Default::default()
+                },
+                source: Some(allocated),
+                snapshot: None,
+                target_recipe: None,
+                target: None,
+                correlation: Some("create-correlation".into()),
+            },
+        )
+        .unwrap();
+    let backend = CountingBackend::default();
+
+    ControlPlane {
+        store: &store,
+        config: &Config::default(),
+        backend: &backend,
+    }
+    .destroy(
+        "x",
+        DestroyOptions {
+            confirm_missing_server: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!store.dir("x").exists());
+    assert!(
+        !backend
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("find:"))
+    );
+}
+
+/// Adopted legacy teardown markers without frozen inventory reconcile active and correlated servers.
+#[tokio::test]
+async fn legacy_destroy_reconciles_inventory_before_freezing_it() {
+    let d = tempdir().unwrap();
+    let dir = d.path().join("x");
+    fs::create_dir(&dir).unwrap();
+    legacy_fixture(&dir, "resuming-recovery", "resume");
+    fs::remove_file(dir.join("current.env.paused")).unwrap();
+    fs::write(
+        dir.join("current.env"),
+        "DROPLET_ID=101\nDROPLET_IP=192.0.2.1\nDROPLET_NAME=worker\nKNOWN_HOSTS_FILE=x\nSSH_CONFIG_FILE=x\nSSH_ALIAS=x\nCREATED_AT=now\n",
+    )
+    .unwrap();
+    let transition = fs::read_to_string(dir.join("current.env.transition"))
+        .unwrap()
+        .replace("TARGET_DROPLET_ID=202", "TARGET_DROPLET_ID=")
+        .replace("TARGET_DROPLET_IP=192.0.2.2", "TARGET_DROPLET_IP=")
+        .replace("TEARDOWN_STARTED=0", "TEARDOWN_STARTED=1");
+    fs::write(dir.join("current.env.transition"), transition).unwrap();
+
+    let active = server("101");
+    let mut correlated = server("202");
+    correlated.tags.push("resume-tag".into());
+    let snapshot = Snapshot {
+        id: "9".into(),
+        name: "snap".into(),
+        source_id: "101".into(),
+        region: "nyc3".into(),
+        min_disk_gb: 25,
+        host_key: "ssh-ed25519 AAAA".into(),
+        pause_operation_id: "pause-1".into(),
+        source_recipe: None,
+        regions: vec!["nyc3".into()],
+    };
+    let backend = CountingBackend::default();
+    *backend.servers.lock().unwrap() = vec![active, correlated];
+    *backend.snapshots.lock().unwrap() = vec![snapshot];
+    let store = Store::new(d.path().into());
+
+    ControlPlane {
+        store: &store,
+        config: &Config::default(),
+        backend: &backend,
+    }
+    .destroy("x", DestroyOptions::default())
+    .await
+    .unwrap();
+
+    assert!(!store.dir("x").exists());
+    assert!(backend.servers.lock().unwrap().is_empty());
+    assert!(backend.snapshots.lock().unwrap().is_empty());
+    let calls = backend.calls.lock().unwrap();
+    assert!(calls.iter().any(|call| call == "find:resume-tag"));
+    assert!(calls.iter().any(|call| call == "delete-server:101"));
+    assert!(calls.iter().any(|call| call == "delete-server:202"));
+    assert!(calls.iter().any(|call| call == "delete-snapshot:9"));
+}
+
+/// Remote-control status and pairing extraction accept only explicit supported JSON fields and values.
 #[test]
 fn remote_control_json_decisions_are_strict() {
     assert!(remote_usable(&serde_json::json!({"status":"connected"})));
@@ -548,6 +825,7 @@ fn remote_control_json_decisions_are_strict() {
     assert_eq!(pairing_code(&serde_json::json!({"code":""})), None);
 }
 
+/// Pause markers reject unknown fields and container IDs outside the exact 64-hex format.
 #[test]
 fn pause_marker_parser_requires_exact_fields_and_container_ids() {
     let id = "a".repeat(64);
@@ -561,6 +839,7 @@ fn pause_marker_parser_requires_exact_fields_and_container_ids() {
     assert!(parse_pause_marker(&marker.replace(&"a".repeat(64), "not-an-id")).is_err());
 }
 
+/// Legacy state parsing decodes escaped spaces but rejects command substitution as inert data.
 #[test]
 fn legacy_parser_is_non_executable() {
     assert!(legacy::parse("A=$(touch /tmp/nope)\n").is_err());
@@ -569,6 +848,7 @@ fn legacy_parser_is_non_executable() {
         "hello world"
     )
 }
+/// Native state round-trips, excludes incomplete directories, and uses owner-only files on Unix.
 #[test]
 fn state_round_trip_and_permissions() {
     let d = tempdir().unwrap();
@@ -622,7 +902,13 @@ fn state_round_trip_and_permissions() {
             0o600
         );
     }
+    #[cfg(windows)]
+    {
+        assert!(s.dir("test-a").join("instance.json").is_file());
+        assert!(s.dir("test-a").join("github-token").is_file());
+    }
 }
+/// Identifier validation rejects traversal and malformed Git references while accepting a normal repository.
 #[test]
 fn validation_rejects_paths() {
     assert!(validate_instance_id("../x").is_err());
@@ -630,6 +916,7 @@ fn validation_rejects_paths() {
     assert!(validate_branch("bad..branch").is_err())
 }
 
+/// Writes a complete legacy fixture for one pause or resume transition phase.
 fn legacy_fixture(dir: &std::path::Path, phase: &str, kind: &str) {
     fs::write(
         dir.join("current.env.setup"),
@@ -647,6 +934,7 @@ fn legacy_fixture(dir: &std::path::Path, phase: &str, kind: &str) {
     fs::write(dir.join("current.env.transition"), transition).unwrap();
 }
 
+/// Adoption converts every legacy transition phase and exposes its native journal immediately.
 #[test]
 fn adopts_all_seven_legacy_phases_and_mutating_view_sees_transition() {
     for (phase, kind) in [
@@ -673,6 +961,31 @@ fn adopts_all_seven_legacy_phases_and_mutating_view_sees_transition() {
     }
 }
 
+/// Missing legacy pause identifiers produce a state error rather than panicking during import.
+#[test]
+fn malformed_legacy_snapshot_transition_returns_state_error_without_panicking() {
+    let d = tempdir().unwrap();
+    legacy_fixture(d.path(), "pausing-snapshot", "pause");
+    let transition = fs::read_to_string(d.path().join("current.env.transition"))
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            !line.starts_with("OPERATION_ID=") && !line.starts_with("PAUSE_OPERATION_ID=")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        d.path().join("current.env.transition"),
+        format!("{transition}\n"),
+    )
+    .unwrap();
+
+    let result = std::panic::catch_unwind(|| legacy::import(d.path(), "x"));
+    assert!(result.is_ok(), "legacy import panicked");
+    assert!(result.unwrap().is_err());
+}
+
+/// Interrupted adoption replays legacy authority, replacing an obsolete partial native journal.
 #[test]
 fn incomplete_legacy_adoption_replays_and_removes_obsolete_transition() {
     let d = tempdir().unwrap();
@@ -702,6 +1015,7 @@ fn incomplete_legacy_adoption_replays_and_removes_obsolete_transition() {
     assert!(dir.join("current.env.setup").exists());
 }
 
+/// Legacy allocation intent maps only `0` and `1`; other boolean spellings are rejected.
 #[test]
 fn legacy_allocation_requested_maps_strictly() {
     for (value, expected) in [("0", false), ("1", true)] {
@@ -740,6 +1054,7 @@ fn legacy_allocation_requested_maps_strictly() {
     assert!(legacy::import(d.path(), "x").is_err());
 }
 
+/// Legacy import rejects executable syntax and simultaneous active and paused state evidence.
 #[test]
 fn legacy_import_rejects_contradictory_and_malformed_state() {
     let d = tempdir().unwrap();

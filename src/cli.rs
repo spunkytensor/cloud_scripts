@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -90,6 +93,7 @@ pub enum Commands {
     },
 }
 
+/// Builds the clap command definition used by the CLI and completion tooling.
 pub fn command() -> clap::Command {
     Cli::command()
 }

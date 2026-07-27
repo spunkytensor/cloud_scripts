@@ -27,8 +27,8 @@ allow = [
   "Zlib",
 ]
 
-# This executable is intentionally unpublished and has no project license yet.
-# Continue enforcing the allowlist for every third-party dependency.
+# The executable is intentionally unpublished; continue enforcing the allowlist for every
+# third-party dependency independently of this project's Apache-2.0 license.
 private = { ignore = true }
 
 [bans]

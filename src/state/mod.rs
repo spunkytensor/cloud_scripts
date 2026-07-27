@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod legacy;
 use crate::{
     error::{Error, Result},
@@ -10,6 +13,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Store {
@@ -19,17 +23,21 @@ pub struct Lock {
     _file: File,
 }
 impl Store {
+    /// Creates a store rooted at the directory containing per-instance state.
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
+    /// Returns the state directory for a validated instance identifier.
     pub fn dir(&self, id: &str) -> PathBuf {
         self.root.join(id)
     }
+    /// Creates the instance directory if necessary and acquires its exclusive lifecycle lock.
     pub fn lock(&self, id: &str) -> Result<Lock> {
         let d = self.dir(id);
         fs::create_dir_all(&d)?;
         self.lock_dir(id, &d)
     }
+    /// Acquires an exclusive lock only for an already existing instance directory.
     pub fn lock_existing(&self, id: &str) -> Result<Lock> {
         let d = self.dir(id);
         if !d.is_dir() {
@@ -37,6 +45,7 @@ impl Store {
         }
         self.lock_dir(id, &d)
     }
+    /// Secures `d` and acquires its nonblocking exclusive lifecycle lock.
     fn lock_dir(&self, id: &str, d: &Path) -> Result<Lock> {
         secure_dir(d)?;
         let f = OpenOptions::new()
@@ -52,6 +61,7 @@ impl Store {
         })?;
         Ok(Lock { _file: f })
     }
+    /// Reads native instance JSON and validates every persisted lifecycle invariant.
     pub fn load(&self, id: &str) -> Result<Instance> {
         let i: Instance = serde_json::from_slice(&fs::read(self.dir(id).join("instance.json"))?)?;
         i.validate()?;
@@ -71,6 +81,8 @@ impl Store {
             Err(e) => Err(e),
         }
     }
+    /// Converts retained legacy files into durable native state and commits a migration marker last.
+    /// Interrupted imports remain replayable because legacy evidence is never removed.
     fn import_legacy(&self, id: &str) -> Result<Instance> {
         let imported = legacy::import(&self.dir(id), id)?;
         self.save(&imported.instance)?;
@@ -114,10 +126,12 @@ impl Store {
         )?;
         Ok(reread)
     }
+    /// Locks an existing instance, then loads native state or completes legacy adoption.
     pub fn load_or_adopt(&self, id: &str) -> Result<Instance> {
         let _lock = self.lock_existing(id)?;
         self.load_or_adopt_locked(id)
     }
+    /// Loads and validates the optional transition journal against current instance state.
     pub fn transition(&self, id: &str) -> Result<Option<Transition>> {
         let p = self.dir(id).join("transition.json");
         if !p.exists() {
@@ -128,16 +142,19 @@ impl Store {
         t.validate(&i)?;
         Ok(Some(t))
     }
+    /// Validates and atomically persists the instance state.
     pub fn save(&self, i: &Instance) -> Result<()> {
         i.validate()?;
         atomic_json(&self.dir(&i.instance_id).join("instance.json"), i)
     }
+    /// Atomically persists secret in the private instance state directory.
     pub fn save_secret(&self, id: &str, name: &str, value: &[u8]) -> Result<()> {
         if name.contains('/') || name.starts_with('.') {
             return Err(Error::State("invalid secret state name".into()));
         }
         atomic_bytes(&self.dir(id).join(name), value)
     }
+    /// Removes persisted secret, treating an absent file as already complete.
     pub fn remove_secret(&self, id: &str, name: &str) -> Result<()> {
         if name.contains('/') || name.starts_with('.') {
             return Err(Error::State("invalid secret state name".into()));
@@ -163,10 +180,12 @@ impl Store {
         )?;
         Ok(reread)
     }
+    /// Atomically persists transition in the private instance state directory.
     pub fn save_transition(&self, id: &str, t: &Transition) -> Result<()> {
         t.validate(&self.load(id)?)?;
         atomic_json(&self.dir(id).join("transition.json"), t)
     }
+    /// Removes persisted transition, treating an absent file as already complete.
     pub fn clear_transition(&self, id: &str) -> Result<()> {
         let p = self.dir(id).join("transition.json");
         if p.exists() {
@@ -174,6 +193,7 @@ impl Store {
         }
         Ok(())
     }
+    /// Lists validated persisted instance identifiers in deterministic order.
     pub fn ids(&self) -> Result<Vec<String>> {
         if !self.root.exists() {
             return Ok(vec![]);
@@ -192,22 +212,26 @@ impl Store {
         Ok(v)
     }
 }
+/// Atomically replaces a file with `value`, including durable directory synchronization where supported.
 fn atomic_bytes(p: &Path, value: &[u8]) -> Result<()> {
     let d = p
         .parent()
         .ok_or_else(|| Error::State("state path has no parent".into()))?;
     fs::create_dir_all(d)?;
     secure_dir(d)?;
-    let tmp = d.join(format!(".secret.tmp-{}", std::process::id()));
+    let tmp = d.join(format!(".secret.tmp-{}", Uuid::new_v4()));
     let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     secure_file(&f)?;
     f.write_all(value)?;
     f.sync_all()?;
     drop(f);
+    // Rename is the visibility commit; syncing the containing directory makes that commit
+    // survive a crash after the temporary file's contents have reached stable storage.
     fs::rename(&tmp, p)?;
     sync_dir(d)?;
     Ok(())
 }
+/// Serializes `v` and atomically persists it at `p`.
 fn atomic_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
     let d = p
         .parent()
@@ -217,7 +241,7 @@ fn atomic_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
     let tmp = d.join(format!(
         ".{}.tmp-{}",
         p.file_name().unwrap().to_string_lossy(),
-        std::process::id()
+        Uuid::new_v4()
     ));
     let mut o = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     secure_file(&o)?;
@@ -229,32 +253,38 @@ fn atomic_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
     sync_dir(d)?;
     Ok(())
 }
+/// Flushes a directory entry update to durable storage on Unix.
 #[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
+/// Performs no directory sync where `std::fs::File` cannot open directories.
 #[cfg(not(unix))]
 fn sync_dir(_: &Path) -> Result<()> {
     // Windows does not permit opening a directory through std::fs::File.
     Ok(())
 }
+/// Sets a state directory to owner-only access on Unix.
 #[cfg(unix)]
 fn secure_dir(p: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
+/// Leaves directory ACL management to the platform on non-Unix systems.
 #[cfg(not(unix))]
 fn secure_dir(_: &Path) -> Result<()> {
     Ok(())
 }
+/// Sets an open state file to owner read/write access on Unix.
 #[cfg(unix)]
 fn secure_file(f: &File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     f.set_permissions(fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
+/// Leaves file ACL management to the platform on non-Unix systems.
 #[cfg(not(unix))]
 fn secure_file(_: &File) -> Result<()> {
     Ok(())

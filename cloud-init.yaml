@@ -1,4 +1,7 @@
 #cloud-config
+# SPDX-FileCopyrightText: 2026 Matt Curfman
+# SPDX-License-Identifier: Apache-2.0
+
 package_update: true
 package_upgrade: false
 

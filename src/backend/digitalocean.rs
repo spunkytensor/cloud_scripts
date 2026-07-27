@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{Backend, Mutation};
 use crate::{
     config::DigitalOcean as Settings,
@@ -15,6 +18,8 @@ pub struct DigitalOcean {
     token: String,
 }
 impl DigitalOcean {
+    /// Builds a DigitalOcean client from settings and environment credentials.
+    /// The API base URL is normalized to omit a trailing slash.
     pub fn new(s: &Settings) -> Result<Self> {
         let token = env::var("DIGITALOCEAN_TOKEN")
             .or_else(|_| env::var("DOCTL_TOKEN"))
@@ -33,10 +38,12 @@ impl DigitalOcean {
             token,
         })
     }
+    /// Sends a provider API request relative to the configured endpoint.
     async fn req(&self, m: Method, path: &str, body: Option<Value>) -> Result<Option<Value>> {
         self.req_url(m, format!("{}{}", self.base, path), body)
             .await
     }
+    /// Sends one authenticated provider request and conservatively classifies empty, failed, and uncertain responses.
     async fn req_url(&self, m: Method, url: String, body: Option<Value>) -> Result<Option<Value>> {
         let mut r = self
             .client
@@ -95,6 +102,7 @@ impl DigitalOcean {
         }
     }
 
+    /// Collects a trusted provider collection across pagination links, rejecting malformed page shapes.
     async fn pages(&self, first: String, field: &str) -> Result<Vec<Value>> {
         let base = reqwest::Url::parse(&self.base).map_err(|e| Error::Backend(e.to_string()))?;
         let mut next = Some(format!("{}{}", self.base, first));
@@ -109,6 +117,8 @@ impl DigitalOcean {
                 .pointer("/links/pages/next")
                 .and_then(Value::as_str)
                 .map(|raw| {
+                    // Pagination URLs are provider input too. Keep bearer credentials on the
+                    // configured origin and beneath its API path rather than following blindly.
                     reqwest::Url::parse(raw).and_then(|candidate| {
                         if candidate.scheme() != base.scheme()
                             || candidate.host_str() != base.host_str()
@@ -126,11 +136,13 @@ impl DigitalOcean {
         Ok(items)
     }
 }
+/// Returns whether an HTTP status leaves a provider mutation's outcome uncertain.
 fn mutation_status_uncertain(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
 }
+/// Converts a DigitalOcean Droplet response into provider-neutral server state.
 fn server(v: &Value) -> Result<Server> {
     let d = &v["droplet"];
     let endpoint = d["networks"]["v4"]
@@ -161,12 +173,14 @@ fn server(v: &Value) -> Result<Server> {
             .unwrap_or_default(),
     })
 }
+/// Normalizes a DigitalOcean string or numeric resource ID to text.
 fn id(v: &Value) -> Result<String> {
     v.as_str()
         .map(str::to_owned)
         .or_else(|| v.as_u64().map(|x| x.to_string()))
         .ok_or_else(|| Error::Backend("response is missing resource ID".into()))
 }
+/// Extracts a required string field from a DigitalOcean response object.
 fn text(v: &Value, k: &str) -> Result<String> {
     v[k].as_str()
         .map(str::to_owned)
@@ -174,6 +188,7 @@ fn text(v: &Value, k: &str) -> Result<String> {
 }
 #[async_trait]
 impl Backend for DigitalOcean {
+    /// Probes the paginated Droplet endpoint required by least-privilege lifecycle tokens.
     async fn validate_access(&self) -> Result<()> {
         // Probe a permission required by the lifecycle rather than requiring
         // the unrelated account:read scope from least-privilege tokens.
@@ -182,6 +197,7 @@ impl Backend for DigitalOcean {
             .ok_or_else(|| Error::Backend("droplet access check returned no response".into()))
             .map(|_| ())
     }
+    /// Lists all DigitalOcean account SSH-key IDs across pages of 200.
     async fn ssh_keys(&self) -> Result<Vec<String>> {
         self.pages("/account/keys?per_page=200".into(), "ssh_keys")
             .await?
@@ -189,6 +205,7 @@ impl Backend for DigitalOcean {
             .map(|key| id(&key["id"]))
             .collect()
     }
+    /// POSTs a Droplet recipe and maps the response to a server, preserving uncertain HTTP outcomes.
     async fn create_server(
         &self,
         r: &CreateRecipe,
@@ -205,6 +222,7 @@ impl Backend for DigitalOcean {
             Err(e) => Err(e),
         }
     }
+    /// Lists all Droplets filtered by DigitalOcean's exact `tag_name` query.
     async fn find_servers(&self, tag: &str) -> Result<Vec<Server>> {
         self.pages(format!("/droplets?tag_name={tag}"), "droplets")
             .await?
@@ -212,6 +230,7 @@ impl Backend for DigitalOcean {
             .map(|d| server(&json!({"droplet":d})))
             .collect()
     }
+    /// Fetches `/droplets/{id}`, returning `None` only for a provider-confirmed 404.
     async fn get_server(&self, id_: &str) -> Result<Option<Server>> {
         match self
             .req(Method::GET, &format!("/droplets/{id_}"), None)
@@ -221,6 +240,7 @@ impl Backend for DigitalOcean {
             None => Ok(None),
         }
     }
+    /// DELETEs `/droplets/{id}` and treats an empty success as confirmed deletion.
     async fn delete_server(&self, id: &str) -> Result<Mutation<()>> {
         mutation_unit(
             self.req(Method::DELETE, &format!("/droplets/{id}"), None)
@@ -228,6 +248,7 @@ impl Backend for DigitalOcean {
             format!("server {id} is missing; confirm account and absence"),
         )
     }
+    /// POSTs a Droplet action, including `name` for snapshot actions, and preserves uncertainty.
     async fn action(
         &self,
         resource_id: &str,
@@ -260,31 +281,37 @@ impl Backend for DigitalOcean {
             Err(e) => Err(e),
         }
     }
+    /// Fetches the global `/actions/{id}` endpoint, returning `None` for a confirmed 404.
     async fn get_action(&self, id_: &str) -> Result<Option<Action>> {
         self.req(Method::GET, &format!("/actions/{id_}"), None)
             .await?
             .map(|v| action(&v["action"]))
             .transpose()
     }
+    /// Paginates a Droplet's actions and filters by type, resource ID, and start time.
     async fn find_actions(
         &self,
         resource_id: &str,
         kind: &str,
         since: &str,
     ) -> Result<Vec<Action>> {
-        self.pages(format!("/droplets/{resource_id}/actions"), "actions")
-            .await?
-            .iter()
-            .map(action)
-            .filter(|a| {
-                a.as_ref().map_or(true, |a| {
-                    a.kind == kind
-                        && a.resource_id == resource_id
-                        && action_started_since(a.started_at.as_deref(), since)
-                })
+        self.pages(
+            format!("/droplets/{resource_id}/actions?per_page=200"),
+            "actions",
+        )
+        .await?
+        .iter()
+        .map(action)
+        .filter(|a| {
+            a.as_ref().map_or(true, |a| {
+                a.kind == kind
+                    && a.resource_id == resource_id
+                    && action_started_since(a.started_at.as_deref(), since)
             })
-            .collect()
+        })
+        .collect()
     }
+    /// Polls the global action endpoint until completion, failure, disappearance, or timeout.
     async fn wait_action(&self, expected: &Action) -> Result<()> {
         for _ in 0..120 {
             let found = self
@@ -307,13 +334,18 @@ impl Backend for DigitalOcean {
             expected.id
         )))
     }
+    /// Lists all Droplet snapshots across DigitalOcean pages of 200.
     async fn snapshots(&self) -> Result<Vec<Snapshot>> {
-        self.pages("/snapshots?resource_type=droplet".into(), "snapshots")
-            .await?
-            .iter()
-            .map(snapshot)
-            .collect()
+        self.pages(
+            "/snapshots?resource_type=droplet&per_page=200".into(),
+            "snapshots",
+        )
+        .await?
+        .iter()
+        .map(snapshot)
+        .collect()
     }
+    /// Fetches `/snapshots/{id}`, returning `None` only for a provider-confirmed 404.
     async fn get_snapshot(&self, id_: &str) -> Result<Option<Snapshot>> {
         match self
             .req(Method::GET, &format!("/snapshots/{id_}"), None)
@@ -323,6 +355,7 @@ impl Backend for DigitalOcean {
             None => Ok(None),
         }
     }
+    /// DELETEs `/snapshots/{id}` and treats an empty success as confirmed deletion.
     async fn delete_snapshot(&self, id: &str) -> Result<Mutation<()>> {
         mutation_unit(
             self.req(Method::DELETE, &format!("/snapshots/{id}"), None)
@@ -331,6 +364,7 @@ impl Backend for DigitalOcean {
         )
     }
 }
+/// Converts a DigitalOcean action object into provider-neutral action state.
 fn action(v: &Value) -> Result<Action> {
     Ok(Action {
         id: id(&v["id"])?,
@@ -344,6 +378,7 @@ fn action(v: &Value) -> Result<Action> {
         started_at: v["started_at"].as_str().map(str::to_owned),
     })
 }
+/// Compares an action start time with a persisted RFC 3339 or Unix-seconds boundary.
 fn action_started_since(started_at: Option<&str>, since: &str) -> bool {
     let Some(started_at) = started_at else {
         return false;
@@ -353,6 +388,7 @@ fn action_started_since(started_at: Option<&str>, since: &str) -> bool {
     }
     started_at >= since
 }
+/// Parses the supported UTC RFC 3339 form into Unix seconds without external date parsing.
 fn rfc3339_unix_seconds(value: &str) -> Option<i64> {
     let (date, time) = value.split_once('T')?;
     let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
@@ -385,6 +421,7 @@ fn rfc3339_unix_seconds(value: &str) -> Option<i64> {
     let days = era * 146_097 + day_of_era - 719_468;
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
+/// Converts an empty successful mutation response into a confirmed unit result while preserving uncertainty.
 fn mutation_unit(r: Result<Option<Value>>, missing: String) -> Result<Mutation<()>> {
     match r {
         Ok(Some(_)) => Ok(Mutation::Confirmed(())),
@@ -396,6 +433,7 @@ fn mutation_unit(r: Result<Option<Value>>, missing: String) -> Result<Mutation<(
         Err(e) => Err(e),
     }
 }
+/// Converts a DigitalOcean snapshot object, including every available region, to native state.
 fn snapshot(v: &Value) -> Result<Snapshot> {
     let regions: Vec<String> = v["regions"]
         .as_array()
@@ -423,6 +461,7 @@ fn snapshot(v: &Value) -> Result<Snapshot> {
 mod tests {
     use super::*;
 
+    /// Timeouts, throttling, and server failures leave mutation outcomes uncertain.
     #[test]
     fn mutation_http_classification_is_conservative() {
         for status in [408, 429, 500, 503] {
@@ -437,6 +476,7 @@ mod tests {
         }
     }
 
+    /// Action correlation compares both RFC 3339 and legacy Unix timestamp boundaries correctly.
     #[test]
     fn action_time_comparison_supports_persisted_unix_timestamps() {
         assert!(action_started_since(

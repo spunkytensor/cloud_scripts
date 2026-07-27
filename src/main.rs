@@ -1,5 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use clap::Parser;
 use std::{io, path::Path};
+use unicode_width::UnicodeWidthStr;
 use vps_control_plane::{
     backend::Backend,
     backend::digitalocean::DigitalOcean,
@@ -12,6 +16,7 @@ use vps_control_plane::{
     state::Store,
 };
 
+/// Runs the asynchronous command-line entry point and converts failures into process exit status.
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -19,6 +24,7 @@ async fn main() {
         std::process::exit(e.exit_code().into())
     }
 }
+/// Loads configuration, dispatches the selected command, and renders its result.
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Commands::Completion { shell } = &cli.command {
@@ -69,7 +75,7 @@ async fn run() -> Result<()> {
         } => {
             let id = name.unwrap_or_else(generated_id);
             show(
-                &life.create(id, repository, branch).await?,
+                &life.create(&backend_name, id, repository, branch).await?,
                 cli.output,
                 cli.verbose,
                 cli.config.as_deref(),
@@ -122,21 +128,31 @@ async fn run() -> Result<()> {
             forget_unresolved_allocation,
             forget_unrevoked_token,
         } => {
-            life.destroy(
-                &instance,
-                DestroyOptions {
-                    confirm_missing_server,
-                    confirm_missing_snapshot,
-                    confirm_request_not_accepted,
-                    forget_unresolved_allocation,
-                    forget_unrevoked_token,
-                },
-            )
-            .await?;
-            console::success(
-                "Instance",
-                format!("{instance} destroyed; provider and credential cleanup confirmed"),
-            )
+            let outcome = life
+                .destroy(
+                    &instance,
+                    DestroyOptions {
+                        confirm_missing_server,
+                        confirm_missing_snapshot,
+                        confirm_request_not_accepted,
+                        forget_unresolved_allocation,
+                        forget_unrevoked_token,
+                    },
+                )
+                .await?;
+            if outcome.credentials_revoked {
+                console::success(
+                    "Instance",
+                    format!("{instance} destroyed; provider and credential cleanup confirmed"),
+                )
+            } else {
+                console::action(
+                    "Instance",
+                    format!(
+                        "{instance} destroyed; provider cleanup confirmed, credential revocation was explicitly forgotten"
+                    ),
+                )
+            }
         }
         Commands::Doctor => {
             console::pending("Doctor", "Checking DigitalOcean API access");
@@ -169,12 +185,13 @@ async fn run() -> Result<()> {
     }
     Ok(())
 }
+/// Handles commands that need only persisted state, rendering lists/status or opening SSH.
 fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
     match cli.command {
         Commands::List => {
             let mut rows = vec![];
             for id in s.ids()? {
-                match load_or_import(s, &id) {
+                match s.load_or_adopt(&id) {
                     Ok(i) => rows.push(i),
                     Err(e) => console::error(format!("{id}: {e}")),
                 }
@@ -241,7 +258,7 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
             }
         }
         Commands::Status { instance, .. } => {
-            let i = load_or_import(s, &instance)?;
+            let i = s.load_or_adopt(&instance)?;
             show(
                 &i,
                 cli.output,
@@ -251,8 +268,9 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
             )?
         }
         Commands::Shell { instance } => {
-            let i = load_or_import(s, &instance)?;
+            let i = s.load_or_adopt(&instance)?;
             if let Some(t) = s.transition(&instance)?
+                && !t.completed_for(&i)
                 && t.phase != vps_control_plane::model::Phase::ActiveSnapshotCleanupPending
             {
                 return Err(Error::State(format!(
@@ -297,12 +315,12 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
     }
     Ok(())
 }
-fn load_or_import(s: &Store, id: &str) -> Result<vps_control_plane::model::Instance> {
-    s.load_or_adopt(id)
-}
+/// Generates a collision-resistant worker identifier suitable for persisted state paths.
 fn generated_id() -> String {
     format!("worker-{}", uuid::Uuid::new_v4().simple())
 }
+/// Verifies persisted resources against the provider and refreshes active server metadata.
+/// Missing owned resources and ambiguous allocation correlations are reported as uncertain.
 async fn refresh_status(
     mut instance: vps_control_plane::model::Instance,
     backend: &dyn Backend,
@@ -343,11 +361,12 @@ async fn refresh_status(
     console::success("Provider", "Provider state refreshed");
     Ok(instance)
 }
+/// Renders a left-aligned plain-text table using Unicode display widths.
 fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String {
     let widths: [usize; N] = std::array::from_fn(|column| {
         rows.iter()
-            .map(|row| row[column].len())
-            .chain([headers[column].len()])
+            .map(|row| UnicodeWidthStr::width(row[column].as_str()))
+            .chain([UnicodeWidthStr::width(headers[column])])
             .max()
             .unwrap_or(0)
     });
@@ -359,7 +378,10 @@ fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String {
                 if column + 1 == N {
                     (*cell).to_owned()
                 } else {
-                    format!("{cell:<width$}", width = widths[column] + 2)
+                    format!(
+                        "{cell}{}",
+                        " ".repeat(widths[column] + 2 - UnicodeWidthStr::width(*cell))
+                    )
                 }
             })
             .collect::<String>()
@@ -371,6 +393,7 @@ fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String {
     );
     lines.join("\n")
 }
+/// Prints one instance as schema-versioned JSON or human-readable status details.
 fn show(
     i: &vps_control_plane::model::Instance,
     output: Output,
@@ -408,6 +431,7 @@ fn show(
     }
     Ok(())
 }
+/// Builds a copyable `vps shell` command preserving explicit config and home paths.
 fn shell_command(id: &str, config: Option<&Path>, home: Option<&Path>) -> String {
     let mut command = String::from("vps shell");
     if let Some(path) = config {
@@ -422,9 +446,11 @@ fn shell_command(id: &str, config: Option<&Path>, home: Option<&Path>) -> String
     command.push_str(id);
     command
 }
+/// Single-quotes a path for safe use as one POSIX shell argument.
 fn shell_arg(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
+/// Derives display status and provider identifiers, preferring an in-progress transition.
 fn summary(
     i: &vps_control_plane::model::Instance,
     t: Option<&vps_control_plane::model::Transition>,
@@ -475,6 +501,7 @@ fn summary(
         }
     }
 }
+/// Maps a persisted transition phase to its stable CLI status spelling.
 fn phase_status(phase: &vps_control_plane::model::Phase) -> &'static str {
     use vps_control_plane::model::Phase;
     match phase {
@@ -492,7 +519,9 @@ fn phase_status(phase: &vps_control_plane::model::Phase) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::table;
+    use unicode_width::UnicodeWidthStr;
 
+    /// Table columns align to the widest header or cell.
     #[test]
     fn table_aligns_columns_to_longest_value() {
         let output = table(
@@ -507,5 +536,15 @@ mod tests {
         let lines: Vec<_> = output.lines().collect();
         assert_eq!(lines[0].find("STATUS"), lines[1].find("active"));
         assert_eq!(lines[0].find("WORK BRANCH"), lines[1].find("codex/"));
+    }
+
+    /// Table alignment uses terminal display width rather than UTF-8 byte length.
+    #[test]
+    fn table_aligns_columns_by_unicode_display_width() {
+        let output = table(["NAME", "STATUS"], &[["開発".into(), "active".into()]]);
+        let lines: Vec<_> = output.lines().collect();
+        let header_offset = UnicodeWidthStr::width(&lines[0][..lines[0].find("STATUS").unwrap()]);
+        let row_offset = UnicodeWidthStr::width(&lines[1][..lines[1].find("active").unwrap()]);
+        assert_eq!(header_offset, row_offset);
     }
 }

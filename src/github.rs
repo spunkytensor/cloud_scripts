@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::{Error, Result};
 use std::{fs, path::Path};
 #[derive(Debug, Clone)]
@@ -5,6 +8,7 @@ pub struct Replacement {
     pub old: String,
     pub new: String,
 }
+/// Builds the GitHub fine-grained token creation URL scoped to the repository owner.
 pub fn creation_url(repository: &str, server_id: &str) -> String {
     let mut url = reqwest::Url::parse("https://github.com/settings/personal-access-tokens/new")
         .expect("static GitHub URL is valid");
@@ -25,6 +29,7 @@ pub fn creation_url(repository: &str, server_id: &str) -> String {
         .append_pair("statuses", "read");
     url.into()
 }
+/// Validates this value's persisted invariants and rejects unsafe or contradictory state.
 pub async fn validate(token: &str, repository: &str) -> Result<String> {
     if !token.starts_with("github_pat_") {
         return Err(Error::Cli(
@@ -74,6 +79,7 @@ pub async fn validate(token: &str, repository: &str) -> Result<String> {
     }
     Ok(login)
 }
+/// Reads the retained credential token, if present, without logging its contents.
 pub fn retained_token(dir: &Path) -> Result<Option<String>> {
     let p = dir.join("github-token");
     if !p.exists() {
@@ -85,6 +91,7 @@ pub fn retained_token(dir: &Path) -> Result<Option<String>> {
     }
     Ok(Some(t.trim().into()))
 }
+/// Reads and deduplicates all retained credential tokens eligible for revocation.
 pub fn retained_tokens(dir: &Path) -> Result<Vec<String>> {
     let mut values = Vec::new();
     if let Some(v) = retained_token(dir)? {
@@ -112,6 +119,7 @@ pub fn retained_tokens(dir: &Path) -> Result<Vec<String>> {
     }
     Ok(values)
 }
+/// Loads a pending credential replacement only when both old and new token records are complete.
 pub fn replacement(dir: &Path) -> Result<Option<Replacement>> {
     let journal = dir.join("github-token.replacement");
     if !journal.exists() {
@@ -144,6 +152,7 @@ pub fn replacement(dir: &Path) -> Result<Option<Replacement>> {
     })
 }
 
+/// Encodes a credential replacement record for private atomic persistence.
 pub fn replacement_bytes(old: &str, new: &str) -> Result<Vec<u8>> {
     // Fine-grained PATs are deliberately restricted to this non-shell-active alphabet.
     if old == new
@@ -161,6 +170,7 @@ pub fn replacement_bytes(old: &str, new: &str) -> Result<Vec<u8>> {
             .into_bytes(),
     )
 }
+/// Requests GitHub token revocation and rejects responses that do not confirm success.
 pub async fn revoke(token: &str) -> Result<()> {
     let r = reqwest::Client::new()
         .post("https://api.github.com/credentials/revoke")
@@ -184,6 +194,7 @@ pub async fn revoke(token: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The PAT creation URL targets the repository owner and requests only required permissions.
     #[test]
     fn creation_url_scopes_token_to_repository_owner() {
         let url = reqwest::Url::parse(&creation_url("owner/repo name", "123")).unwrap();

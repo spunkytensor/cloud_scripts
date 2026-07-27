@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -25,6 +28,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// Maps this error category to the stable process exit code exposed by the CLI.
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Cli(_) => 2,

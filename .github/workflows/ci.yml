@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Matt Curfman
+# SPDX-License-Identifier: Apache-2.0
+
 name: CI
 on:
   pull_request:
@@ -30,7 +33,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-1.96.1-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ github.job }}-1.96.1-${{ hashFiles('Cargo.lock') }}
       - name: Enforce package/toolchain contract
         shell: bash
         run: |
@@ -61,5 +64,5 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-1.96.1-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ github.job }}-1.96.1-${{ hashFiles('Cargo.lock') }}
       - run: cargo test --workspace --all-features --locked

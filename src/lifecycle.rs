@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     backend::{Backend, Mutation},
     config::Config,
@@ -25,9 +28,11 @@ pub struct ControlPlane<'a> {
     pub config: &'a Config,
     pub backend: &'a dyn Backend,
 }
+/// Single-quotes a value for safe interpolation as one POSIX shell argument.
 fn shq(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+/// Shows repository-scoped PAT requirements and securely prompts on an interactive terminal.
 fn prompt_github_token(repository: &str, server_id: &str, replacement: bool) -> Result<String> {
     console::action("GitHub", "Authorization required");
     eprintln!(
@@ -46,6 +51,7 @@ fn prompt_github_token(repository: &str, server_id: &str, replacement: bool) -> 
     };
     Ok(rpassword::prompt_password(label)?.trim().to_owned())
 }
+/// Checks over SSH whether the remote Codex CLI reports an authenticated session.
 fn chatgpt_logged_in(server: &Server, key: &Path, known: &Path) -> Result<bool> {
     Ok(ssh::capture(
         server,
@@ -54,6 +60,7 @@ fn chatgpt_logged_in(server: &Server, key: &Path, known: &Path) -> Result<bool> 
         "/usr/local/bin/codex login status >/dev/null 2>&1 && echo yes || echo no",
     )? == "yes")
 }
+/// Returns whether remote control JSON explicitly reports the worker as usable.
 pub fn remote_usable(v: &serde_json::Value) -> bool {
     v.get("status")
         .and_then(|x| x.as_str())
@@ -62,6 +69,7 @@ pub fn remote_usable(v: &serde_json::Value) -> bool {
             .and_then(|x| x.as_str())
             .is_some_and(|s| matches!(s, "connected" | "connecting"))
 }
+/// Returns the pairing code only when remote control JSON has the expected shape.
 pub fn pairing_code(v: &serde_json::Value) -> Option<&str> {
     v.get("manualPairingCode")
         .or_else(|| v.get("code"))
@@ -70,6 +78,7 @@ pub fn pairing_code(v: &serde_json::Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Validates that a snapshot belongs to the expected server disk and region.
 pub fn validate_snapshot(
     found: &Snapshot,
     expected_id: &str,
@@ -99,6 +108,7 @@ pub struct PauseMarker {
     pub healthy_container_ids: Vec<String>,
 }
 
+/// Parses and strictly validates the remote pause marker used to resume a paused worker.
 pub fn parse_pause_marker(input: &str) -> Result<PauseMarker> {
     const KEYS: [&str; 4] = [
         "OPERATION_ID",
@@ -166,7 +176,13 @@ pub struct DestroyOptions {
     pub forget_unresolved_allocation: bool,
     pub forget_unrevoked_token: bool,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct DestroyOutcome {
+    pub credentials_revoked: bool,
+}
 impl ControlPlane<'_> {
+    /// Reconciles or performs a pending allocation while preserving enough evidence for safe retries.
     async fn allocate_pending(&self, i: &mut Instance) -> Result<Server> {
         let (recipe, correlation, request_intent) = match &i.lifecycle {
             Lifecycle::AllocationPending {
@@ -198,8 +214,10 @@ impl ControlPlane<'_> {
         }
 
         let public = public_key(self.config.ssh.private_key.as_deref())?;
-        let cloud =
-            include_str!("../cloud-init.yaml").replace("__AGENT_SSH_AUTHORIZED_KEY__", &public);
+        let cloud = include_str!("../cloud-init.yaml").replace(
+            "__AGENT_SSH_AUTHORIZED_KEY__",
+            &serde_json::to_string(&public)?,
+        );
         if let Lifecycle::AllocationPending { request_intent, .. } = &mut i.lifecycle {
             *request_intent = true;
         }
@@ -237,6 +255,7 @@ impl ControlPlane<'_> {
         }
     }
 
+    /// Installs a repository-scoped GitHub token on the remote host without placing it in provider metadata.
     async fn install_github_token(
         &self,
         i: &Instance,
@@ -316,18 +335,25 @@ impl ControlPlane<'_> {
         let old = replacement
             .as_ref()
             .map_or(token.as_str(), |r| r.old.as_str());
-        let classify = ssh::stdin(
+        let classify = ssh::stdin_output(
             server,
             key(self.config)?,
             known,
             "set -euo pipefail; d=/home/agent/.config/vps-codex; f=$d/github-token; IFS= read -r old; IFS= read -r new; if [[ ! -e $f ]]; then echo absent; elif cmp -s $f <(printf %s \"$old\") || cmp -s $f <(printf %s \"$new\"); then echo retained; else exit 42; fi",
             format!("{old}\n{token}\n").as_bytes(),
             false,
-        );
-        if classify.is_err() {
+        )?;
+        if classify.status.code() == Some(42) {
             return Err(Error::State(
                 "worker has a foreign, untracked GitHub token; refusing overwrite".into(),
             ));
+        }
+        if !classify.status.success() {
+            return Err(Error::Remote(if classify.stderr.is_empty() {
+                format!("ssh exited with {}", classify.status)
+            } else {
+                classify.stderr
+            }));
         }
         // Initial/replacement local evidence is durable before this remote mutation.
         ssh::stdin(
@@ -351,7 +377,14 @@ impl ControlPlane<'_> {
         Ok(actor)
     }
 
-    pub async fn create(&self, id: String, repository: String, branch: String) -> Result<Instance> {
+    /// Creates or safely continues creation of an instance, journaling provider mutations before advancing lifecycle state.
+    pub async fn create(
+        &self,
+        backend: &str,
+        id: String,
+        repository: String,
+        branch: String,
+    ) -> Result<Instance> {
         validate_instance_id(&id)?;
         validate_repository(&repository)?;
         validate_branch(&branch)?;
@@ -361,6 +394,12 @@ impl ControlPlane<'_> {
             || self.store.dir(&id).join("current.env.setup").exists()
         {
             let mut i = self.store.load_or_adopt_locked(&id)?;
+            if i.backend != backend {
+                return Err(Error::State(format!(
+                    "existing instance backend {} does not match requested backend {backend}",
+                    i.backend
+                )));
+            }
             if i.repository != repository || i.base_branch != branch {
                 return Err(Error::State(
                     "existing instance source does not match requested source".into(),
@@ -423,7 +462,7 @@ impl ControlPlane<'_> {
         let mut i = Instance {
             schema_version: 1,
             instance_id: id.clone(),
-            backend: "digitalocean".into(),
+            backend: backend.into(),
             created_at: now(),
             repository,
             base_branch: branch,
@@ -451,6 +490,7 @@ impl ControlPlane<'_> {
         Ok(i)
     }
 
+    /// Waits for the allocated server and provisions its repository and credentials over SSH.
     async fn provision(&self, i: &Instance, mut server: Server) -> Result<Server> {
         // Always poll the persisted provider ID, never a name or a newly allocated server.
         console::pending(
@@ -601,11 +641,19 @@ else git switch "$work"; fi
         );
         Ok(server)
     }
+    /// Pauses an instance through the persisted, resumable pause state machine.
     pub async fn pause(&self, id: &str, options: PauseOptions) -> Result<Instance> {
         console::heading("Pause", id);
         let _lock = self.store.lock_existing(id)?;
         let i = self.store.load_or_adopt_locked(id)?;
-        let existing = self.store.transition(id)?;
+        let mut existing = self.store.transition(id)?;
+        if existing
+            .as_ref()
+            .is_some_and(|transition| transition.completed_for(&i))
+        {
+            self.store.clear_transition(id)?;
+            existing = None;
+        }
         let server = existing
             .as_ref()
             .filter(|t| t.kind == TransitionKind::Pause)
@@ -834,6 +882,8 @@ VPS_PAUSE"#,
         self.finish_pause_delete(id, i, t, options).await
     }
 
+    /// Deletes the verified pause source, requiring explicit confirmation if it vanished.
+    /// The paused state is committed only after deletion is confirmed.
     async fn finish_pause_delete(
         &self,
         id: &str,
@@ -870,6 +920,7 @@ VPS_PAUSE"#,
         Ok(i)
     }
 
+    /// Polls a server up to `attempts`, treating provider-confirmed absence as terminal success.
     async fn wait_for_server_status(
         &self,
         id: &str,
@@ -892,6 +943,8 @@ VPS_PAUSE"#,
         Ok(current)
     }
 
+    /// Reconciles a journaled shutdown or snapshot action before submitting a new request.
+    /// Ambiguous or absent prior requests require evidence or explicit confirmation before retry.
     #[allow(clippy::too_many_arguments)]
     async fn continue_action(
         &self,
@@ -998,6 +1051,7 @@ VPS_PAUSE"#,
             Mutation::Rejected { diagnostic } => Err(Error::Backend(diagnostic)),
         }
     }
+    /// Reconciles or submits the forced power-off fallback while preserving request intent.
     async fn continue_power_off(
         &self,
         t: &mut Transition,
@@ -1055,11 +1109,27 @@ VPS_PAUSE"#,
             Mutation::Rejected { diagnostic } => Err(Error::Backend(diagnostic)),
         }
     }
+    /// Resumes an instance through the persisted, resumable resume state machine.
     pub async fn resume(&self, id: &str, options: ResumeOptions) -> Result<Instance> {
         console::heading("Resume", id);
         let _lock = self.store.lock_existing(id)?;
         let mut i = self.store.load_or_adopt_locked(id)?;
-        let existing = self.store.transition(id)?;
+        let mut existing = self.store.transition(id)?;
+        if let Some(t) = &existing {
+            if t.kind == TransitionKind::Resume
+                && t.phase == Phase::ActiveSnapshotCleanupPending
+                && t.checkpoints.snapshot_delete_confirmed
+                && matches!(i.lifecycle, Lifecycle::Active { snapshot: None, .. })
+            {
+                self.store.clear_transition(id)?;
+                console::success("Snapshot", "Consumed recovery snapshot cleanup reconciled");
+                return Ok(i);
+            }
+            if t.completed_for(&i) {
+                self.store.clear_transition(id)?;
+                existing = None;
+            }
+        }
         if let Some(t) = &existing {
             if t.kind == TransitionKind::Resume
                 && t.phase == Phase::ActiveSnapshotCleanupPending
@@ -1087,16 +1157,18 @@ VPS_PAUSE"#,
                 _ => None,
             })
             .ok_or_else(|| Error::State("resume requires paused state".into()))?;
-        match &i.lifecycle {
-            Lifecycle::Paused { snapshot } => snapshot.clone(),
+        if matches!(
+            i.lifecycle,
             Lifecycle::Active {
-                snapshot: Some(_), ..
-            } => return self.cleanup_snapshot(id, i, options).await,
-            _ if existing.is_none() => {
-                return Err(Error::State("resume requires paused state".into()));
+                snapshot: Some(_),
+                ..
             }
-            _ => snap.clone(),
-        };
+        ) {
+            return self.cleanup_snapshot(id, i, options).await;
+        }
+        if existing.is_none() && !matches!(i.lifecycle, Lifecycle::Paused { .. }) {
+            return Err(Error::State("resume requires paused state".into()));
+        }
         let correlation = format!("vps-resume-{}", Uuid::new_v4());
         let source_recipe = snap
             .source_recipe
@@ -1402,6 +1474,8 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         self.store.save(&i)?;
         self.cleanup_snapshot(id, i, options).await
     }
+    /// Deletes a consumed recovery snapshot only after recovery was durably verified.
+    /// Missing snapshots require operator confirmation before active state is finalized.
     async fn cleanup_snapshot(
         &self,
         id: &str,
@@ -1465,29 +1539,32 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         console::success("Snapshot", "Consumed recovery snapshot deleted");
         Ok(i)
     }
-    pub async fn destroy(&self, id: &str, options: DestroyOptions) -> Result<()> {
+    /// Destroys owned provider resources conservatively and reports any retained credentials or uncertain mutations.
+    pub async fn destroy(&self, id: &str, options: DestroyOptions) -> Result<DestroyOutcome> {
         console::heading("Destroy", id);
         let _lock = self.store.lock_existing(id)?;
         let i = self.store.load_or_adopt_locked(id)?;
-        let existing = self.store.transition(id)?;
+        let mut existing = self.store.transition(id)?;
+        if existing
+            .as_ref()
+            .is_some_and(|transition| transition.completed_for(&i))
+        {
+            self.store.clear_transition(id)?;
+            existing = None;
+        }
         if matches!(i.lifecycle, Lifecycle::SourceReserved { .. }) {
             if existing.is_some() {
                 return Err(Error::State(
                     "source-reserved state unexpectedly has provider mutation evidence".into(),
                 ));
             }
-            for token in crate::github::retained_tokens(&self.store.dir(id))? {
-                console::pending("GitHub", "Revoking the retained repository credential");
-                if let Err(error) = crate::github::revoke(&token).await
-                    && !options.forget_unrevoked_token
-                {
-                    return Err(error);
-                }
-                console::success("GitHub", "Repository credential revoked");
-            }
+            let credentials_revoked =
+                revoke_credentials(&self.store.dir(id), options.forget_unrevoked_token).await?;
             fs::remove_dir_all(self.store.dir(id))?;
             console::success("Local state", "Instance state removed");
-            return Ok(());
+            return Ok(DestroyOutcome {
+                credentials_revoked,
+            });
         }
         console::pending(
             "Inventory",
@@ -1496,23 +1573,37 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         let mut servers = Vec::<Server>::new();
         let mut snapshots = Vec::<Snapshot>::new();
         let mut correlations = Vec::<String>::new();
-        match &i.lifecycle {
-            Lifecycle::Active {
-                server: s,
-                snapshot: p,
-            } => {
-                servers.push(s.clone());
-                if let Some(p) = p {
-                    snapshots.push(p.clone())
+        // Native destroy journals freeze a complete inventory before mutation. Legacy teardown
+        // markers carry no inventory, so they must be reconciled once during adoption rather
+        // than being mistaken for an authoritative empty set.
+        let frozen_teardown = existing.as_ref().is_some_and(|transition| {
+            transition.kind == TransitionKind::Destroy
+                && transition.phase == Phase::Destroying
+                && transition.checkpoints.teardown_started
+                && (!transition.checkpoints.teardown_servers.is_empty()
+                    || !transition.checkpoints.teardown_snapshots.is_empty())
+        });
+        if !frozen_teardown {
+            match &i.lifecycle {
+                Lifecycle::Active {
+                    server: s,
+                    snapshot: p,
+                } => {
+                    servers.push(s.clone());
+                    if let Some(p) = p {
+                        snapshots.push(p.clone())
+                    }
                 }
+                Lifecycle::Paused { snapshot: s } => snapshots.push(s.clone()),
+                Lifecycle::AllocationPending { correlation, .. } => {
+                    correlations.push(correlation.clone());
+                }
+                Lifecycle::SourceReserved { .. } => unreachable!(),
             }
-            Lifecycle::Paused { snapshot: s } => snapshots.push(s.clone()),
-            Lifecycle::AllocationPending { correlation, .. } => {
-                correlations.push(correlation.clone());
-            }
-            Lifecycle::SourceReserved { .. } => unreachable!(),
         }
         if let Some(t) = &existing {
+            servers.extend(t.checkpoints.teardown_servers.clone());
+            snapshots.extend(t.checkpoints.teardown_snapshots.clone());
             if let Some(s) = &t.source {
                 servers.push(s.clone())
             }
@@ -1522,10 +1613,7 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             if let Some(s) = &t.snapshot {
                 snapshots.push(s.clone())
             }
-            if t.kind == TransitionKind::Pause
-                && t.checkpoints.snapshot_intent
-                && t.snapshot.is_none()
-            {
+            if !frozen_teardown && t.checkpoints.snapshot_intent && t.snapshot.is_none() {
                 let source = t.source.as_ref().ok_or_else(|| {
                     Error::State("pending snapshot has no source evidence".into())
                 })?;
@@ -1580,7 +1668,7 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
                     }
                 }
             }
-            if t.checkpoints.target_create_intent && t.target.is_none() {
+            if !frozen_teardown && t.checkpoints.target_create_intent && t.target.is_none() {
                 correlations.push(t.correlation.clone().ok_or_else(|| {
                     Error::State("target create intent has no correlation".into())
                 })?);
@@ -1613,6 +1701,13 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             ),
         );
         // Persist the complete inventory and teardown decision before the first mutation.
+        let mut checkpoints = existing
+            .as_ref()
+            .map(|transition| transition.checkpoints.clone())
+            .unwrap_or_default();
+        checkpoints.teardown_started = true;
+        checkpoints.teardown_servers = servers.clone();
+        checkpoints.teardown_snapshots = snapshots.clone();
         let teardown = Transition {
             schema_version: 1,
             kind: TransitionKind::Destroy,
@@ -1625,10 +1720,7 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
                 .as_ref()
                 .map(|t| t.started_at.clone())
                 .unwrap_or_else(now),
-            checkpoints: Checkpoints {
-                teardown_started: true,
-                ..Default::default()
-            },
+            checkpoints,
             source: servers.first().cloned(),
             target: servers.get(1).cloned(),
             snapshot: snapshots.first().cloned(),
@@ -1651,15 +1743,8 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             console::success("Provider", "Provider server deletion confirmed");
         }
         // Credentials are revoked only after every inventoried server has confirmed deletion.
-        for token in crate::github::retained_tokens(&self.store.dir(id))? {
-            console::pending("GitHub", "Revoking the retained repository credential");
-            if let Err(e) = crate::github::revoke(&token).await
-                && !options.forget_unrevoked_token
-            {
-                return Err(e);
-            }
-            console::success("GitHub", "Repository credential revoked");
-        }
+        let credentials_revoked =
+            revoke_credentials(&self.store.dir(id), options.forget_unrevoked_token).await?;
         for s in &snapshots {
             console::pending("Snapshot", "Deleting the retained snapshot");
             let direct = self.backend.get_snapshot(&s.id).await?;
@@ -1691,9 +1776,41 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         }
         fs::remove_dir_all(self.store.dir(id))?;
         console::success("Local state", "Instance state removed");
-        Ok(())
+        Ok(DestroyOutcome {
+            credentials_revoked,
+        })
     }
 }
+
+/// Revokes retained GitHub credentials, optionally forgetting a token whose revocation cannot be confirmed.
+async fn revoke_credentials(dir: &Path, forget_unrevoked_token: bool) -> Result<bool> {
+    let owner = fs::read_to_string(dir.join("github-user"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(
+            || "unrecorded GitHub user".to_owned(),
+            |value| value.trim().to_owned(),
+        );
+    let mut all_revoked = true;
+    for token in crate::github::retained_tokens(dir)? {
+        console::pending("GitHub", "Revoking the retained repository credential");
+        match crate::github::revoke(&token).await {
+            Ok(()) => console::success("GitHub", "Repository credential revoked"),
+            Err(error) if forget_unrevoked_token => {
+                all_revoked = false;
+                console::action(
+                    "Credential",
+                    format!(
+                        "Revocation failed for {owner}; forgetting local evidence as explicitly requested ({error})"
+                    ),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(all_revoked)
+}
+/// Extracts a confirmed mutation value and rejects uncertain provider outcomes.
 fn confirmed<T>(m: Mutation<T>) -> Result<T> {
     match m {
         Mutation::Confirmed(v) => Ok(v),
@@ -1701,23 +1818,46 @@ fn confirmed<T>(m: Mutation<T>) -> Result<T> {
         Mutation::Uncertain { diagnostic } => Err(Error::Uncertain(diagnostic)),
     }
 }
+/// Returns the configured SSH private-key path or a CLI configuration error.
 fn key(c: &Config) -> Result<&Path> {
     c.ssh
         .private_key
         .as_deref()
         .ok_or_else(|| Error::Cli("ssh.private_key is required".into()))
 }
+/// Reads the `.pub` file beside the configured private key and validates it for cloud-init use.
 fn public_key(private: Option<&Path>) -> Result<String> {
     let p = private.ok_or_else(|| Error::Cli("ssh.private_key is required".into()))?;
     let pubp = std::path::PathBuf::from(format!("{}.pub", p.display()));
     let s = fs::read_to_string(&pubp)
         .map_err(|_| Error::Cli(format!("public SSH key not found: {}", pubp.display())))?;
-    if !s.starts_with("ssh-") {
-        return Err(Error::Cli("public SSH key is malformed".into()));
-    }
-    Ok(s.trim().into())
+    normalize_public_key(&s)
 }
 
+/// Removes one line ending and accepts only a single safe OpenSSH public-key record.
+fn normalize_public_key(contents: &str) -> Result<String> {
+    let key = contents.strip_suffix('\n').unwrap_or(contents);
+    let key = key.strip_suffix('\r').unwrap_or(key);
+    let mut fields = key.split(' ');
+    let algorithm = fields.next().unwrap_or_default();
+    let encoded = fields.next().unwrap_or_default();
+    if key.is_empty()
+        || key.contains(['\r', '\n'])
+        || key
+            .bytes()
+            .any(|byte| !(byte == b' ' || byte.is_ascii_graphic()) || byte == b'#')
+        || !algorithm.starts_with("ssh-")
+        || encoded.is_empty()
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return Err(Error::Cli("public SSH key is malformed".into()));
+    }
+    Ok(key.into())
+}
+
+/// Writes `contents` without exposing the file to other users on supported platforms.
 fn secure_write(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
     let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
@@ -1733,4 +1873,18 @@ fn secure_write(path: &Path, contents: &[u8]) -> Result<()> {
     file.sync_all()?;
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_public_key;
+
+    /// Public-key validation rejects multiline, comment, and control-character injection.
+    #[test]
+    fn public_key_rejects_cloud_init_injection() {
+        assert!(normalize_public_key("ssh-ed25519 AAAA user@host\n").is_ok());
+        assert!(normalize_public_key("ssh-ed25519 AAAA\n- root: true\n").is_err());
+        assert!(normalize_public_key("ssh-ed25519 AAAA user#comment\n").is_err());
+        assert!(normalize_public_key("ssh-ed25519 AAAA\tcomment\n").is_err());
+    }
 }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     error::{Error, Result},
     model::*,
@@ -14,9 +17,11 @@ pub struct Import {
     pub credentials_owned: bool,
 }
 
+/// Reads and parses a legacy state file without evaluating shell syntax.
 pub fn parse_file(path: &Path) -> Result<BTreeMap<String, String>> {
     parse(&fs::read_to_string(path)?)
 }
+/// Parses legacy shell-style state as inert data without executing its contents.
 pub fn parse(s: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for (n, raw) in s.lines().enumerate() {
@@ -47,6 +52,8 @@ pub fn parse(s: &str) -> Result<BTreeMap<String, String>> {
     }
     Ok(out)
 }
+/// Decodes the restricted shell quoting emitted by legacy state without evaluating shell syntax.
+/// Unsupported escapes, metacharacters, and trailing escapes are rejected.
 fn decode_q(s: &str) -> std::result::Result<String, String> {
     if s.is_empty() {
         return Ok(String::new());
@@ -94,6 +101,7 @@ fn decode_q(s: &str) -> std::result::Result<String, String> {
     }
     Ok(o)
 }
+/// Loads an optional legacy state fragment and rejects every field outside its phase schema.
 fn file(dir: &Path, suffix: &str, allowed: &[&str]) -> Result<Option<BTreeMap<String, String>>> {
     let p = dir.join(format!("current.env{suffix}"));
     if !p.exists() {
@@ -109,12 +117,14 @@ fn file(dir: &Path, suffix: &str, allowed: &[&str]) -> Result<Option<BTreeMap<St
     }
     Ok(Some(m))
 }
+/// Returns a required, nonempty legacy field.
 fn req(m: &BTreeMap<String, String>, k: &str) -> Result<String> {
     m.get(k)
         .filter(|v| !v.is_empty())
         .cloned()
         .ok_or_else(|| Error::State(format!("legacy field {k} missing")))
 }
+/// Parses a legacy boolean, accepting only absent/`0` as false and `1` as true.
 fn boolean(m: &BTreeMap<String, String>, k: &str) -> Result<bool> {
     match m.get(k).map(String::as_str).unwrap_or("") {
         "" | "0" => Ok(false),
@@ -122,6 +132,7 @@ fn boolean(m: &BTreeMap<String, String>, k: &str) -> Result<bool> {
         _ => Err(Error::State(format!("invalid legacy boolean {k}"))),
     }
 }
+/// Splits the legacy comma-separated tag field, omitting empty entries.
 fn tags(v: Option<&String>) -> Vec<String> {
     v.map(|x| {
         x.split(',')
@@ -131,6 +142,7 @@ fn tags(v: Option<&String>) -> Vec<String> {
     })
     .unwrap_or_default()
 }
+/// Reconstructs an allocation recipe from legacy fields using the legacy key placeholder.
 fn recipe(
     name: String,
     region: String,
@@ -147,6 +159,7 @@ fn recipe(
         ssh_key: "legacy-configured-key".into(),
     }
 }
+/// Reconstructs either the source or target server recorded in a legacy transition.
 fn server(m: &BTreeMap<String, String>, prefix: bool) -> Result<Server> {
     let p = if prefix { "SOURCE_" } else { "TARGET_" };
     Ok(Server {
@@ -250,6 +263,7 @@ const TRANS: &[&str] = &[
     "TARGET_DELETE_CONFIRMED",
 ];
 
+/// Imports a complete legacy instance and transition while rejecting contradictory evidence.
 pub fn import(dir: &Path, id: &str) -> Result<Import> {
     validate_instance_id(id)?;
     let setup =
@@ -393,6 +407,7 @@ pub fn import(dir: &Path, id: &str) -> Result<Import> {
         credentials_owned,
     })
 }
+/// Converts a legacy transition map into a validated native transition for `i`.
 fn transition(m: &BTreeMap<String, String>, i: &Instance) -> Result<Transition> {
     if m.get("TRANSITION_VERSION").map(String::as_str) != Some("1") {
         return Err(Error::State("invalid transition version".into()));
@@ -418,6 +433,12 @@ fn transition(m: &BTreeMap<String, String>, i: &Instance) -> Result<Transition> 
         None
     };
     let snapshot = if m.get("SNAPSHOT_ID").is_some_and(|x| !x.is_empty()) {
+        let pause_operation_id = m
+            .get("PAUSE_OPERATION_ID")
+            .filter(|x| !x.is_empty())
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| req(m, "OPERATION_ID"))?;
         Some(Snapshot {
             id: req(m, "SNAPSHOT_ID")?,
             name: req(m, "SNAPSHOT_NAME")?,
@@ -428,11 +449,7 @@ fn transition(m: &BTreeMap<String, String>, i: &Instance) -> Result<Transition> 
                 .and_then(|x| x.parse().ok())
                 .unwrap_or(0),
             host_key: req(m, "SSH_HOST_ED25519_PUBLIC_KEY")?,
-            pause_operation_id: m
-                .get("PAUSE_OPERATION_ID")
-                .filter(|x| !x.is_empty())
-                .cloned()
-                .unwrap_or_else(|| req(m, "OPERATION_ID").unwrap()),
+            pause_operation_id,
             source_recipe: None,
             regions: vec![req(m, "SOURCE_REGION")?],
         })
@@ -493,6 +510,8 @@ fn transition(m: &BTreeMap<String, String>, i: &Instance) -> Result<Transition> 
             snapshot_delete_confirmed: boolean(m, "SNAPSHOT_DELETE_CONFIRMED")?,
             target_delete_confirmed: boolean(m, "TARGET_DELETE_CONFIRMED")?,
             teardown_started: boolean(m, "TEARDOWN_STARTED")?,
+            teardown_servers: Vec::new(),
+            teardown_snapshots: Vec::new(),
         },
         source,
         snapshot,

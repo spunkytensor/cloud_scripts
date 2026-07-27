@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     console,
     error::{Error, Result},
@@ -40,6 +43,7 @@ pub struct Git {
     pub author_email: String,
 }
 impl Default for Git {
+    /// Supplies the worker Git identity used when the `[git]` section is omitted.
     fn default() -> Self {
         Self {
             author_name: author(),
@@ -70,6 +74,7 @@ pub struct DigitalOcean {
     pub api_url: Option<String>,
 }
 impl Default for DigitalOcean {
+    /// Supplies first-run DigitalOcean region, size, image, tags, and name defaults.
     fn default() -> Self {
         Self {
             ssh_key: None,
@@ -82,31 +87,40 @@ impl Default for DigitalOcean {
         }
     }
 }
+/// Returns the default backend used when no explicit value is configured.
 fn default_backend() -> String {
     "digitalocean".into()
 }
+/// Returns the default DigitalOcean region used by first-run configuration.
 fn region() -> String {
     "nyc3".into()
 }
+/// Returns the default DigitalOcean Droplet size.
 fn size() -> String {
     "s-4vcpu-8gb".into()
 }
+/// Returns the default Ubuntu image slug.
 fn image() -> String {
     "ubuntu-24-04-x64".into()
 }
+/// Returns the default prefix for generated Droplet names.
 fn prefix() -> String {
     "codex-agent".into()
 }
+/// Returns the default tags attached to managed Droplets.
 fn tags() -> Vec<String> {
     vec!["codex-agent".into()]
 }
+/// Returns the default Git author name configured on workers.
 fn author() -> String {
     "Codex VPS Agent".into()
 }
+/// Returns the default Git author email configured on workers.
 fn email() -> String {
     "codex-vps-agent@users.noreply.github.com".into()
 }
 impl Default for Config {
+    /// Builds schema-version-one configuration from section defaults.
     fn default() -> Self {
         Self {
             version: 1,
@@ -119,6 +133,8 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Loads version-one TOML configuration, applying environment overrides and tilde expansion.
+    /// Missing default configuration triggers interactive first-run setup; an explicit missing path fails.
     pub fn load(path: Option<&Path>, home_override: Option<PathBuf>) -> Result<(Self, PathBuf)> {
         let home = match home_override {
             Some(home) => expand(home),
@@ -129,6 +145,8 @@ impl Config {
             Some(path) => expand(path.to_path_buf()),
             None => home.join("vps.toml"),
         };
+        // Only the conventional path participates in first-run setup: a misspelled or
+        // unavailable explicit path must fail rather than silently creating configuration.
         if !explicit_config && !config_path.exists() {
             initialize(&home, &config_path)?;
         }
@@ -147,6 +165,7 @@ impl Config {
         Ok((c, home.join("state/instances")))
     }
 }
+/// Applies supported environment overrides to an already populated configuration.
 fn apply_environment(c: &mut Config) {
     let d = &mut c.backends.digitalocean;
     if let Ok(v) = env::var("DO_SSH_KEY") {
@@ -176,6 +195,7 @@ fn apply_environment(c: &mut Config) {
         c.ssh.private_key = Some(PathBuf::from(v))
     }
 }
+/// Interactively gathers first-run settings and writes a private, non-secret configuration file.
 fn initialize(home: &Path, path: &Path) -> Result<()> {
     if !io::stdin().is_terminal() {
         return Err(Error::Cli(format!(
@@ -209,6 +229,8 @@ fn initialize(home: &Path, path: &Path) -> Result<()> {
     let mut input = io::stdin().lock();
     let mut output = io::stderr().lock();
     let config = prompt_config(&mut input, &mut output, seed)?;
+    // Persist only non-secret settings; cloud and repository credentials stay in their
+    // environment and private lifecycle stores respectively.
     secure_write(path, format!(
         "{}\n\n# Set DIGITALOCEAN_TOKEN in the environment. Never put cloud or GitHub tokens\n# in this file.\n",
         toml::to_string_pretty(&config)?.trim_end()
@@ -216,6 +238,7 @@ fn initialize(home: &Path, path: &Path) -> Result<()> {
     console::success("Configuration", format!("Saved {}", path.display()));
     Ok(())
 }
+/// Prompts for every required worker and DigitalOcean setting using values from `c` as defaults.
 fn prompt_config<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -274,6 +297,7 @@ fn prompt_config<R: BufRead, W: Write>(
     )?;
     Ok(c)
 }
+/// Reads one trimmed answer, accepting a nonempty default and retrying empty required values.
 fn ask<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -306,6 +330,7 @@ fn ask<R: BufRead, W: Write>(
         writeln!(writer, "    A value is required.")?;
     }
 }
+/// Reads a nonempty value from the user's Git configuration, returning `None` on any failure.
 fn git_config(key: &str) -> Option<String> {
     let output = Command::new("git")
         .args(["config", "--get", key])
@@ -323,6 +348,7 @@ struct DoctlSshKey {
     fingerprint: String,
     name: String,
 }
+/// Lists DigitalOcean SSH keys through `doctl`, returning no suggestions when the command fails.
 fn doctl_ssh_keys() -> Vec<DoctlSshKey> {
     let Ok(output) = Command::new("doctl")
         .args([
@@ -344,6 +370,7 @@ fn doctl_ssh_keys() -> Vec<DoctlSshKey> {
         .map(|stdout| parse_doctl_ssh_keys(&stdout))
         .unwrap_or_default()
 }
+/// Parses `doctl`'s whitespace-separated ID, fingerprint, and possibly spaced name columns.
 fn parse_doctl_ssh_keys(output: &str) -> Vec<DoctlSshKey> {
     output
         .lines()
@@ -357,6 +384,7 @@ fn parse_doctl_ssh_keys(output: &str) -> Vec<DoctlSshKey> {
         })
         .collect()
 }
+/// Writes `contents` without exposing the file to other users on supported platforms.
 fn secure_write(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path
         .parent()
@@ -386,33 +414,40 @@ fn secure_write(path: &Path, contents: &[u8]) -> Result<()> {
     sync_dir(directory)?;
     Ok(())
 }
+/// Sets the configuration directory to owner-only access on Unix.
 #[cfg(unix)]
 fn secure_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
+/// Leaves configuration-directory ACL management to the platform on non-Unix systems.
 #[cfg(not(unix))]
 fn secure_dir(_: &Path) -> Result<()> {
     Ok(())
 }
+/// Flushes the newly renamed configuration entry to durable storage on Unix.
 #[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
+/// Performs no directory sync where `std::fs::File` cannot open directories.
 #[cfg(not(unix))]
 fn sync_dir(_: &Path) -> Result<()> {
     Ok(())
 }
+/// Returns the default home used when no explicit value is configured.
 fn default_home() -> Result<PathBuf> {
     user_home()
         .map(|home| home.join(".vps"))
         .ok_or_else(|| Error::Cli("cannot determine the user home directory".into()))
 }
+/// Returns the platform user home directory when it can be determined.
 fn user_home() -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
+/// Expands a leading `~` or `~/` against the platform user home, leaving other paths unchanged.
 fn expand(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
     if (s == "~" || s.starts_with("~/"))
@@ -427,6 +462,7 @@ fn expand(p: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Default state and configuration are rooted beneath the user's `.vps` directory.
     #[test]
     fn defaults_are_beneath_vps_home() {
         let root = default_home().unwrap();
@@ -434,6 +470,7 @@ mod tests {
         assert_eq!(root, user_home().unwrap().join(".vps"));
     }
 
+    /// A custom VPS home controls both the default config path and returned state path.
     #[test]
     fn custom_home_owns_config_and_state() {
         let temp = tempfile::tempdir().unwrap();
@@ -452,6 +489,7 @@ mod tests {
         assert_eq!(state, home.join("state/instances"));
     }
 
+    /// First-run prompts retain defaults and populate every required setting.
     #[test]
     fn setup_prompts_populate_complete_config() {
         let mut seed = Config::default();
@@ -480,6 +518,7 @@ mod tests {
         assert_eq!(config.backends.digitalocean.name_prefix, "codex-agent");
     }
 
+    /// `doctl` key parsing preserves names containing spaces and ignores malformed rows.
     #[test]
     fn parses_doctl_key_choices_and_names() {
         let keys = parse_doctl_ssh_keys("123456 aa:bb personal key\n789012 cc:dd automation\n");
@@ -491,6 +530,7 @@ mod tests {
         assert_eq!(keys[1].id, "789012");
     }
 
+    /// First-run configuration is persisted with owner-only permissions on Unix.
     #[cfg(unix)]
     #[test]
     fn setup_writes_private_config() {

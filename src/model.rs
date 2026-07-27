@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Matt Curfman
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,15 +149,46 @@ pub struct Checkpoints {
     pub snapshot_delete_confirmed: bool,
     pub target_delete_confirmed: bool,
     pub teardown_started: bool,
-}
-
-impl Checkpoints {
-    pub fn teardown_started(&self) -> bool {
-        self.teardown_started
-    }
+    /// Complete provider inventory frozen before teardown starts.
+    #[serde(default)]
+    pub teardown_servers: Vec<Server>,
+    #[serde(default)]
+    pub teardown_snapshots: Vec<Snapshot>,
 }
 
 impl Transition {
+    /// Returns whether this journal describes work already reflected in `instance`.
+    pub fn completed_for(&self, instance: &Instance) -> bool {
+        match self.kind {
+            TransitionKind::Pause => {
+                self.phase == Phase::PausingDeletePending
+                    && self.checkpoints.source_delete_confirmed
+                    && matches!(
+                        (&instance.lifecycle, &self.snapshot),
+                        (Lifecycle::Paused { snapshot: current }, Some(recorded))
+                            if current.id == recorded.id
+                                && current.source_id == recorded.source_id
+                    )
+            }
+            TransitionKind::Resume => {
+                self.phase == Phase::ActiveSnapshotCleanupPending
+                    && self.checkpoints.snapshot_delete_confirmed
+                    && matches!(
+                        (&instance.lifecycle, &self.target),
+                        (
+                            Lifecycle::Active {
+                                server: current,
+                                snapshot: None,
+                            },
+                            Some(recorded),
+                        ) if current.id == recorded.id
+                    )
+            }
+            TransitionKind::Destroy => false,
+        }
+    }
+
+    /// Validates this value's persisted invariants and rejects unsafe or contradictory state.
     pub fn validate(&self, instance: &Instance) -> Result<()> {
         if self.schema_version != 1 || self.operation_id.is_empty() || self.started_at.is_empty() {
             return Err(Error::State("invalid transition header".into()));
@@ -179,21 +213,22 @@ impl Transition {
         }
         match self.kind {
             TransitionKind::Pause
-                if !matches!(instance.lifecycle, Lifecycle::Active { snapshot: None, .. }) =>
+                if !(matches!(instance.lifecycle, Lifecycle::Active { snapshot: None, .. })
+                    || self.completed_for(instance)) =>
             {
                 return Err(Error::State(
                     "pause transition requires active source state".into(),
                 ));
             }
             TransitionKind::Resume
-                if !matches!(
+                if !(matches!(
                     instance.lifecycle,
                     Lifecycle::Paused { .. }
                         | Lifecycle::Active {
                             snapshot: Some(_),
                             ..
                         }
-                ) =>
+                ) || self.completed_for(instance)) =>
             {
                 return Err(Error::State(
                     "resume transition requires paused or cleanup-pending state".into(),
@@ -233,6 +268,7 @@ impl Transition {
 }
 
 impl Instance {
+    /// Validates this value's persisted invariants and rejects unsafe or contradictory state.
     pub fn validate(&self) -> Result<()> {
         validate_instance_id(&self.instance_id)?;
         validate_repository(&self.repository)?;
@@ -259,6 +295,7 @@ impl Instance {
         Ok(())
     }
 }
+/// Rejects instance identifiers that are empty, path-like, oversized, or contain unsafe characters.
 pub fn validate_instance_id(v: &str) -> Result<()> {
     if v.is_empty()
         || v.len() > 80
@@ -274,6 +311,7 @@ pub fn validate_instance_id(v: &str) -> Result<()> {
         Ok(())
     }
 }
+/// Requires a canonical `owner/repository` name with safe GitHub identifier characters.
 pub fn validate_repository(v: &str) -> Result<()> {
     let p: Vec<_> = v.split('/').collect();
     if p.len() != 2
@@ -289,6 +327,7 @@ pub fn validate_repository(v: &str) -> Result<()> {
         Ok(())
     }
 }
+/// Rejects empty, oversized, path-like, or syntactically unsafe Git branch names.
 pub fn validate_branch(v: &str) -> Result<()> {
     if v.is_empty()
         || v.starts_with('-')
@@ -303,6 +342,7 @@ pub fn validate_branch(v: &str) -> Result<()> {
         Ok(())
     }
 }
+/// Returns the current UTC time in RFC 3339 form for persisted lifecycle records.
 pub fn now() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Matt Curfman
+# SPDX-License-Identifier: Apache-2.0
+
 param([Parameter(Mandatory=$true)][string]$Target,
       [Parameter(Mandatory=$true)][string]$Destination)
 $ErrorActionPreference = 'Stop'

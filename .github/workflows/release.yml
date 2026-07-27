@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Matt Curfman
+# SPDX-License-Identifier: Apache-2.0
+
 name: Release
 on:
   pull_request:
@@ -42,9 +45,24 @@ jobs:
             *) requested=$package ;;
           esac
           [[ "$requested" == "$package" && "$package" != *-* ]] || { echo 'tag/input must equal a non-prerelease Cargo package version' >&2; exit 1; }
-          [[ "$GITHUB_EVENT_NAME" != push ]] || git verify-tag "$GITHUB_REF_NAME"
           [[ "$(cargo run --locked -- --version)" == *"$package"* ]] || { echo 'CLI version mismatch' >&2; exit 1; }
           echo "version=$package" >>"$GITHUB_OUTPUT"
+      - name: Verify signed release tag with GitHub
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/git"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          ref=$(curl --fail-with-body --silent --show-error "${auth[@]}" "$api/ref/tags/$GITHUB_REF_NAME")
+          [[ "$(jq -r '.object.type' <<<"$ref")" == tag ]] || { echo 'release tag must be an annotated signed tag' >&2; exit 1; }
+          tag=$(curl --fail-with-body --silent --show-error "${auth[@]}" "$api/tags/$(jq -r '.object.sha' <<<"$ref")")
+          jq -e '.verification.verified == true and .verification.reason == "valid"' <<<"$tag" >/dev/null || {
+            echo 'GitHub did not verify the release tag signature as valid' >&2
+            exit 1
+          }
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
