@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod cli;
 pub mod config;
+pub mod console;
 pub mod error;
 pub mod github;
 pub mod lifecycle;

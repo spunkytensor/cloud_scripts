@@ -154,6 +154,7 @@ impl Config {
         if let Ok(v) = env::var("SSH_PRIVATE_KEY_FILE") {
             c.ssh.private_key = Some(PathBuf::from(v))
         }
+        c.ssh.private_key = c.ssh.private_key.map(expand);
         let root = state_override
             .or_else(|| c.state_dir.clone())
             .unwrap_or_else(default_state);
@@ -178,32 +179,4 @@ fn expand(p: PathBuf) -> PathBuf {
         return PathBuf::from(h).join(s.trim_start_matches("~/"));
     }
     p
-}
-
-pub fn migrate_legacy(source: &Path) -> Result<String> {
-    let values = crate::state::legacy::parse_file(source)?;
-    let mut c = Config::default();
-    let d = &mut c.backends.digitalocean;
-    if let Some(v) = values.get("DO_SSH_KEY") {
-        d.ssh_key = Some(v.clone())
-    }
-    if let Some(v) = values.get("DO_REGION") {
-        d.region = v.clone()
-    }
-    if let Some(v) = values.get("DO_SIZE") {
-        d.size = v.clone()
-    }
-    if let Some(v) = values.get("DO_IMAGE") {
-        d.image = v.clone()
-    }
-    if let Some(v) = values.get("DO_TAGS") {
-        d.tags = v.split(',').map(str::to_owned).collect()
-    }
-    if let Some(v) = values.get("DROPLET_NAME_PREFIX") {
-        d.name_prefix = v.clone()
-    }
-    if let Some(v) = values.get("SSH_PRIVATE_KEY_FILE") {
-        c.ssh.private_key = Some(PathBuf::from(v))
-    }
-    toml::to_string_pretty(&c).map_err(|e| Error::Cli(e.to_string()))
 }

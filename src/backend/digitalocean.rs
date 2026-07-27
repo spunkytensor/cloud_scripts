@@ -175,9 +175,11 @@ fn text(v: &Value, k: &str) -> Result<String> {
 #[async_trait]
 impl Backend for DigitalOcean {
     async fn validate_access(&self) -> Result<()> {
-        self.req(Method::GET, "/account", None)
+        // Probe a permission required by the lifecycle rather than requiring
+        // the unrelated account:read scope from least-privilege tokens.
+        self.req(Method::GET, "/droplets?per_page=1", None)
             .await?
-            .ok_or_else(|| Error::Backend("account not found".into()))
+            .ok_or_else(|| Error::Backend("droplet access check returned no response".into()))
             .map(|_| ())
     }
     async fn create_server(
@@ -271,7 +273,7 @@ impl Backend for DigitalOcean {
                 a.as_ref().map_or(true, |a| {
                     a.kind == kind
                         && a.resource_id == resource_id
-                        && a.started_at.as_deref().unwrap_or("") >= since
+                        && action_started_since(a.started_at.as_deref(), since)
                 })
             })
             .collect()
@@ -335,6 +337,47 @@ fn action(v: &Value) -> Result<Action> {
         started_at: v["started_at"].as_str().map(str::to_owned),
     })
 }
+fn action_started_since(started_at: Option<&str>, since: &str) -> bool {
+    let Some(started_at) = started_at else {
+        return false;
+    };
+    if let Ok(since) = since.parse::<i64>() {
+        return rfc3339_unix_seconds(started_at).is_some_and(|started| started >= since);
+    }
+    started_at >= since
+}
+fn rfc3339_unix_seconds(value: &str) -> Option<i64> {
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
+    let year = date.next()??;
+    let month = date.next()??;
+    let day = date.next()??;
+    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let time = time.strip_suffix('Z')?;
+    let mut time = time.split(':');
+    let hour = time.next()?.parse::<i64>().ok()?;
+    let minute = time.next()?.parse::<i64>().ok()?;
+    let second = time.next()?.split('.').next()?.parse::<i64>().ok()?;
+    if time.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    // Howard Hinnant's civil-date conversion, offset to the Unix epoch.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
 fn mutation_unit(r: Result<Option<Value>>, missing: String) -> Result<Mutation<()>> {
     match r {
         Ok(Some(_)) => Ok(Mutation::Confirmed(())),
@@ -385,5 +428,21 @@ mod tests {
                 StatusCode::from_u16(status).unwrap()
             ));
         }
+    }
+
+    #[test]
+    fn action_time_comparison_supports_persisted_unix_timestamps() {
+        assert!(action_started_since(
+            Some("2026-07-26T23:43:08Z"),
+            "1785109387"
+        ));
+        assert!(!action_started_since(
+            Some("2026-07-26T23:43:06Z"),
+            "1785109387"
+        ));
+        assert!(action_started_since(
+            Some("2026-07-26T23:43:08.123Z"),
+            "2026-07-26T23:43:07Z"
+        ));
     }
 }

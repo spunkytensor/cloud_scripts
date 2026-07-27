@@ -28,7 +28,17 @@ impl Store {
     pub fn lock(&self, id: &str) -> Result<Lock> {
         let d = self.dir(id);
         fs::create_dir_all(&d)?;
-        secure_dir(&d)?;
+        self.lock_dir(id, &d)
+    }
+    pub fn lock_existing(&self, id: &str) -> Result<Lock> {
+        let d = self.dir(id);
+        if !d.is_dir() {
+            return Err(Error::State(format!("instance {id} does not exist")));
+        }
+        self.lock_dir(id, &d)
+    }
+    fn lock_dir(&self, id: &str, d: &Path) -> Result<Lock> {
+        secure_dir(d)?;
         let f = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -105,7 +115,7 @@ impl Store {
         Ok(reread)
     }
     pub fn load_or_adopt(&self, id: &str) -> Result<Instance> {
-        let _lock = self.lock(id)?;
+        let _lock = self.lock_existing(id)?;
         self.load_or_adopt_locked(id)
     }
     pub fn transition(&self, id: &str) -> Result<Option<Transition>> {
@@ -171,7 +181,10 @@ impl Store {
         let mut v = vec![];
         for e in fs::read_dir(&self.root)? {
             let e = e?;
-            if e.file_type()?.is_dir() {
+            if e.file_type()?.is_dir()
+                && (e.path().join("instance.json").is_file()
+                    || e.path().join("current.env.setup").is_file())
+            {
                 v.push(e.file_name().to_string_lossy().into())
             }
         }

@@ -86,7 +86,20 @@ jobs:
       - name: Stage Unix artifact
         if: runner.os != 'Windows'
         shell: bash
-        run: bash packaging/stage-unix.sh '${{ matrix.target }}' '${{ needs.verify.outputs.version }}' 'target/stage'
+        run: |
+          binary='target/${{ matrix.target }}/release/vps'
+          dest=target/stage
+          test -x "$binary"
+          test -f README.md
+          rm -rf "$dest"
+          mkdir -p "$dest/bin" "$dest/completions"
+          install -m 0755 "$binary" "$dest/bin/vps"
+          install -m 0644 README.md vps.example.toml target/THIRD_PARTY_LICENSES.txt "$dest/"
+          test ! -f LICENSE || install -m 0644 LICENSE "$dest/"
+          "$binary" completion bash >"$dest/completions/vps.bash"
+          "$binary" completion zsh >"$dest/completions/_vps"
+          "$binary" completion fish >"$dest/completions/vps.fish"
+          find "$dest" -type f -exec touch -d '@0' {} + 2>/dev/null || true
       - name: Stage Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
@@ -94,7 +107,34 @@ jobs:
       - name: Build Debian package
         if: matrix.kind == 'deb'
         shell: bash
-        run: bash packaging/build-deb.sh target/stage '${{ needs.verify.outputs.version }}' '${{ matrix.deb_arch }}' "target/vps_${{ needs.verify.outputs.version }}_${{ matrix.deb_arch }}.deb"
+        run: |
+          stage=target/stage
+          root=$(mktemp -d)
+          trap 'rm -rf "$root"' EXIT
+          mkdir -p "$root/DEBIAN" "$root/usr/bin" \
+            "$root/usr/share/bash-completion/completions" \
+            "$root/usr/share/zsh/vendor-completions" \
+            "$root/usr/share/fish/vendor_completions.d" \
+            "$root/usr/share/doc/vps"
+          install -m 0755 "$stage/bin/vps" "$root/usr/bin/vps"
+          install -m 0644 "$stage/completions/vps.bash" "$root/usr/share/bash-completion/completions/vps"
+          install -m 0644 "$stage/completions/_vps" "$root/usr/share/zsh/vendor-completions/_vps"
+          install -m 0644 "$stage/completions/vps.fish" "$root/usr/share/fish/vendor_completions.d/vps.fish"
+          install -m 0644 "$stage/README.md" "$root/usr/share/doc/vps/README.md"
+          install -m 0644 "$stage/vps.example.toml" "$root/usr/share/doc/vps/vps.example.toml"
+          install -m 0644 "$stage/THIRD_PARTY_LICENSES.txt" "$root/usr/share/doc/vps/"
+          test ! -f "$stage/LICENSE" || install -m 0644 "$stage/LICENSE" "$root/usr/share/doc/vps/"
+          cat >"$root/DEBIAN/control" <<'EOF'
+          Package: vps
+          Version: ${{ needs.verify.outputs.version }}
+          Architecture: ${{ matrix.deb_arch }}
+          Maintainer: cloud_scripts maintainers
+          Section: admin
+          Priority: optional
+          Description: Safe control plane for disposable cloud workers
+          EOF
+          find "$root" -print0 | xargs -0 touch -d '@0'
+          dpkg-deb --root-owner-group --build "$root" "target/vps_${{ needs.verify.outputs.version }}_${{ matrix.deb_arch }}.deb"
       - name: Smoke test native binary and Debian package
         if: matrix.kind == 'deb'
         shell: bash

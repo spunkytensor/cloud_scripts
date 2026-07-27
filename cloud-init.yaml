@@ -27,7 +27,7 @@ write_files:
     permissions: "0644"
     content: |
       # Preserve the machine identity when this boot disk is restored from a
-      # private snapshot. vps_resume.sh requires the captured Ed25519 key.
+      # private snapshot. `vps resume` requires the captured Ed25519 key.
       ssh_deletekeys: false
   - path: /etc/ssh/sshd_config.d/60-codex-worker.conf
     permissions: "0644"

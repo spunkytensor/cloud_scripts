@@ -5,6 +5,26 @@ pub struct Replacement {
     pub old: String,
     pub new: String,
 }
+pub fn creation_url(repository: &str, server_id: &str) -> String {
+    let mut url = reqwest::Url::parse("https://github.com/settings/personal-access-tokens/new")
+        .expect("static GitHub URL is valid");
+    let owner = repository
+        .split_once('/')
+        .map_or(repository, |(owner, _)| owner);
+    url.query_pairs_mut()
+        .append_pair("name", &format!("Codex VPS {server_id}"))
+        .append_pair(
+            "description",
+            &format!("Temporary autonomous worker for {repository}"),
+        )
+        .append_pair("target_name", owner)
+        .append_pair("expires_in", "2")
+        .append_pair("contents", "write")
+        .append_pair("pull_requests", "write")
+        .append_pair("actions", "read")
+        .append_pair("statuses", "read");
+    url.into()
+}
 pub async fn validate(token: &str, repository: &str) -> Result<String> {
     if !token.starts_with("github_pat_") {
         return Err(Error::Cli(
@@ -157,5 +177,27 @@ pub async fn revoke(token: &str) -> Result<()> {
             "GitHub revocation returned HTTP {}",
             r.status()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creation_url_scopes_token_to_repository_owner() {
+        let url = reqwest::Url::parse(&creation_url("owner/repo name", "123")).unwrap();
+        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(query["name"], "Codex VPS 123");
+        assert_eq!(
+            query["description"],
+            "Temporary autonomous worker for owner/repo name"
+        );
+        assert_eq!(query["target_name"], "owner");
+        assert_eq!(query["expires_in"], "2");
+        assert_eq!(query["contents"], "write");
+        assert_eq!(query["pull_requests"], "write");
+        assert_eq!(query["actions"], "read");
+        assert_eq!(query["statuses"], "read");
     }
 }

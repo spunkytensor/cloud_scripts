@@ -187,6 +187,26 @@ fn server(id: &str) -> Server {
         volume_ids: vec![],
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn config_expands_tilde_in_ssh_private_key() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("vps.toml");
+    fs::write(
+        &path,
+        "version = 1\n[ssh]\nprivate_key = \"~/.ssh/id_digitalocean_v2\"\n",
+    )
+    .unwrap();
+
+    let (config, _) = Config::load(Some(&path), Some(d.path().join("state"))).unwrap();
+
+    assert_eq!(
+        config.ssh.private_key.unwrap(),
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".ssh/id_digitalocean_v2")
+    );
+}
+
 fn instance(lifecycle: Lifecycle) -> Instance {
     Instance {
         schema_version: 1,
@@ -562,7 +582,12 @@ fn state_round_trip_and_permissions() {
     s.save(&i).unwrap();
     s.save_secret("test-a", "github-token", b"github_pat_test")
         .unwrap();
+    fs::create_dir(s.dir("incomplete-command")).unwrap();
+    fs::write(s.dir("incomplete-command").join("lifecycle.lock"), b"").unwrap();
+    assert!(s.load_or_adopt("typo").is_err());
+    assert!(!s.dir("typo").exists());
     assert_eq!(s.load("test-a").unwrap().repository, "o/r");
+    assert_eq!(s.ids().unwrap(), vec!["test-a"]);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

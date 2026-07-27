@@ -19,6 +19,8 @@ pub struct Cli {
     pub state_dir: Option<PathBuf>,
     #[arg(long, global = true, value_enum, default_value = "table")]
     pub output: Output,
+    #[arg(long, global = true)]
+    pub verbose: bool,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -77,21 +79,6 @@ pub enum Commands {
     Completion {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
-    },
-    Man,
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ConfigCommand {
-    Migrate {
-        #[arg(default_value = "config.env")]
-        source: PathBuf,
-        #[arg(long)]
-        output: Option<PathBuf>,
     },
 }
 

@@ -1,12 +1,19 @@
 use crate::{
     backend::{Backend, Mutation},
     config::Config,
+    console,
     error::{Error, Result},
     model::*,
     ssh,
     state::Store,
 };
-use std::{collections::BTreeMap, fs, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, IsTerminal},
+    path::Path,
+    time::Duration,
+};
 use uuid::Uuid;
 
 pub struct ControlPlane<'a> {
@@ -16,6 +23,32 @@ pub struct ControlPlane<'a> {
 }
 fn shq(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+fn prompt_github_token(repository: &str, server_id: &str, replacement: bool) -> Result<String> {
+    console::action("GitHub", "Authorization required");
+    eprintln!(
+        "\n    {}\n\n    Create a fine-grained PAT that:\n      • targets only {repository}\n      • expires in two days\n      • grants Contents and Pull requests: read and write\n      • grants Actions and Commit statuses: read\n\n    Paste it below; input will not be echoed.\n",
+        crate::github::creation_url(repository, server_id)
+    );
+    if !io::stdin().is_terminal() {
+        return Err(Error::Cli(
+            "GitHub token provisioning requires an interactive terminal".into(),
+        ));
+    }
+    let label = if replacement {
+        "Replacement fine-grained GitHub PAT: "
+    } else {
+        "VPS-specific fine-grained GitHub PAT: "
+    };
+    Ok(rpassword::prompt_password(label)?.trim().to_owned())
+}
+fn chatgpt_logged_in(server: &Server, key: &Path, known: &Path) -> Result<bool> {
+    Ok(ssh::capture(
+        server,
+        key,
+        known,
+        "/usr/local/bin/codex login status >/dev/null 2>&1 && echo yes || echo no",
+    )? == "yes")
 }
 pub fn remote_usable(v: &serde_json::Value) -> bool {
     v.get("status")
@@ -139,9 +172,13 @@ impl ControlPlane<'_> {
             } => (recipe.clone(), correlation.clone(), *request_intent),
             _ => unreachable!(),
         };
+        console::pending("Provider", "Checking for an existing correlated Droplet");
         let matches = self.backend.find_servers(&correlation).await?;
         match matches.len() {
-            1 => return Ok(matches[0].clone()),
+            1 => {
+                console::success("Provider", format!("Resuming Droplet {}", matches[0].id));
+                return Ok(matches[0].clone());
+            }
             n if n > 1 => {
                 return Err(Error::Uncertain(format!(
                     "persisted allocation correlation has {n} matches; refusing another create"
@@ -163,8 +200,18 @@ impl ControlPlane<'_> {
             *request_intent = true;
         }
         self.store.save(i)?;
+        console::pending(
+            "Provider",
+            format!(
+                "Creating Droplet {} ({}, {}, {})",
+                recipe.name, recipe.region, recipe.size, recipe.image
+            ),
+        );
         match self.backend.create_server(&recipe, Some(&cloud)).await? {
-            Mutation::Confirmed(server) => Ok(server),
+            Mutation::Confirmed(server) => {
+                console::success("Provider", format!("Created Droplet {}", server.id));
+                Ok(server)
+            }
             Mutation::Uncertain { diagnostic } => {
                 let matches = self.backend.find_servers(&correlation).await?;
                 if matches.len() == 1 {
@@ -205,17 +252,17 @@ impl ControlPlane<'_> {
             ));
         }
         let (token, actor) = if let Some(journal) = &replacement {
+            console::pending("GitHub", "Validating the pending replacement credential");
             let actor = crate::github::validate(&journal.new, &i.repository).await?;
             (journal.new.clone(), actor)
         } else if let Some(old) = &primary {
+            console::pending("GitHub", "Validating the retained repository credential");
             match crate::github::validate(old, &i.repository).await {
                 Ok(actor) => (old.clone(), actor),
                 Err(Error::Cli(message)) if message == "GitHub PAT does not identify a user" => {
-                    let new = rpassword::prompt_password(format!(
-                        "GitHub PAT for {} is expired or inaccessible; replacement PAT: ",
-                        i.repository
-                    ))?;
-                    let new = new.trim().to_owned();
+                    console::action("GitHub", "Retained credential needs replacement");
+                    let new = prompt_github_token(&i.repository, &server.id, true)?;
+                    console::pending("GitHub", "Validating the replacement credential");
                     let actor = crate::github::validate(&new, &i.repository).await?;
                     let actor_file = dir.join("github-user");
                     if actor_file.exists() && fs::read_to_string(&actor_file)?.trim() != actor {
@@ -237,11 +284,8 @@ impl ControlPlane<'_> {
                 Err(error) => return Err(error),
             }
         } else {
-            let token = rpassword::prompt_password(format!(
-                "Fine-grained GitHub PAT for {}: ",
-                i.repository
-            ))?;
-            let token = token.trim().to_owned();
+            let token = prompt_github_token(&i.repository, &server.id, false)?;
+            console::pending("GitHub", "Validating the repository credential");
             let actor = crate::github::validate(&token, &i.repository).await?;
             // Establish local ownership before the first possible remote mutation.
             self.store
@@ -261,6 +305,10 @@ impl ControlPlane<'_> {
 
         // Refuse to overwrite an unowned remote credential. Send candidates over stdin so
         // neither token appears in argv, diagnostics, or command output.
+        console::pending(
+            "GitHub",
+            "Installing the repository credential on the worker",
+        );
         let old = replacement
             .as_ref()
             .map_or(token.as_str(), |r| r.old.as_str());
@@ -303,6 +351,7 @@ impl ControlPlane<'_> {
         validate_instance_id(&id)?;
         validate_repository(&repository)?;
         validate_branch(&branch)?;
+        console::heading("Create", format!("{id}  ·  {repository}@{branch}"));
         let _lock = self.store.lock(&id)?;
         if self.store.dir(&id).join("instance.json").exists()
             || self.store.dir(&id).join("current.env.setup").exists()
@@ -404,6 +453,10 @@ impl ControlPlane<'_> {
 
     async fn provision(&self, i: &Instance, mut server: Server) -> Result<Server> {
         // Always poll the persisted provider ID, never a name or a newly allocated server.
+        console::pending(
+            "Provider",
+            format!("Waiting for Droplet {} public networking", server.id),
+        );
         for _ in 0..60 {
             server = self.backend.get_server(&server.id).await?.ok_or_else(|| {
                 Error::Uncertain("allocated server is not visible by its exact ID".into())
@@ -418,10 +471,22 @@ impl ControlPlane<'_> {
                 "allocated server has no public endpoint".into(),
             ));
         }
+        console::success(
+            "Provider",
+            format!(
+                "Droplet {} is reachable at {}",
+                server.id,
+                server.endpoint.as_deref().unwrap()
+            ),
+        );
         let key = key(self.config)?;
         let known = self.store.dir(&i.instance_id).join("known_hosts");
         let ready = b"set -euo pipefail\ncloud-init status --wait >/dev/null\ntest -f /opt/codex-worker-ready\ndocker info >/dev/null\n";
         let mut last = None;
+        console::pending(
+            "Worker",
+            "Waiting for SSH, cloud-init, and Docker (this can take several minutes)",
+        );
         for _ in 0..60 {
             match ssh::stdin(&server, key, &known, "bash -s", ready, true) {
                 Ok(_) => {
@@ -437,9 +502,14 @@ impl ControlPlane<'_> {
         if let Some(e) = last {
             return Err(e);
         }
+        console::success("Worker", "Bootstrap complete");
 
         let dir = self.store.dir(&i.instance_id);
         let actor = self.install_github_token(i, &server, &known).await?;
+        console::pending(
+            "Workspace",
+            format!("Preparing {} on {}", i.repository, i.work_branch),
+        );
         let setup = format!(
             r#"set -euo pipefail
 repo={repo}; base={base}; work={work}; name={name}; email={email}
@@ -463,14 +533,11 @@ else git switch "$work"; fi
             email = shq(&self.config.git.author_email)
         );
         ssh::stdin(&server, key, &known, "bash -s", setup.as_bytes(), false)?;
+        console::success("Workspace", "Repository checkout ready");
 
         let marker = dir.join("chatgpt-login.json");
-        let logged_in = ssh::capture(
-            &server,
-            key,
-            &known,
-            "/usr/local/bin/codex login status >/dev/null 2>&1 && echo yes || echo no",
-        )? == "yes";
+        console::pending("ChatGPT", "Checking worker login");
+        let logged_in = chatgpt_logged_in(&server, key, &known)?;
         if logged_in && !marker.exists() {
             return Err(Error::State(
                 "worker has a foreign, untracked ChatGPT login; log it out before retrying".into(),
@@ -484,6 +551,7 @@ else git switch "$work"; fi
                 "chatgpt-login.json",
                 br#"{"schema_version":1,"managed":true}"#,
             )?;
+            console::action("ChatGPT", "Complete the device login shown below");
             ssh::run(
                 &server,
                 key,
@@ -491,16 +559,11 @@ else git switch "$work"; fi
                 &["/usr/local/bin/codex", "login", "--device-auth"],
                 true,
             )?;
-            if ssh::capture(
-                &server,
-                key,
-                &known,
-                "/usr/local/bin/codex login status >/dev/null 2>&1 && echo yes || echo no",
-            )? != "yes"
-            {
+            if !chatgpt_logged_in(&server, key, &known)? {
                 return Err(Error::Remote("ChatGPT login verification failed".into()));
             }
         }
+        console::pending("Remote control", "Starting and requesting a pairing code");
         let start: serde_json::Value = serde_json::from_str(&ssh::capture(
             &server,
             key,
@@ -528,14 +591,19 @@ else git switch "$work"; fi
             "remote-control.json",
             br#"{"schema_version":1,"enrolled":true}"#,
         )?;
-        eprintln!(
-            "GitHub actor: {actor}; pairing code: {}",
-            pairing_code(&pair).unwrap()
+        console::success("GitHub", format!("Authenticated as {actor}"));
+        console::action(
+            "Pairing code",
+            format!(
+                "Enter {} in the controlling client",
+                pairing_code(&pair).unwrap()
+            ),
         );
         Ok(server)
     }
     pub async fn pause(&self, id: &str, options: PauseOptions) -> Result<Instance> {
-        let _lock = self.store.lock(id)?;
+        console::heading("Pause", id);
+        let _lock = self.store.lock_existing(id)?;
         let i = self.store.load_or_adopt_locked(id)?;
         let existing = self.store.transition(id)?;
         let server = existing
@@ -567,6 +635,7 @@ else git switch "$work"; fi
                 .finish_pause_delete(id, i, existing.unwrap(), options)
                 .await;
         }
+        console::pending("Provider", "Verifying the active Droplet");
         let current = self.backend.get_server(&server.id).await?.ok_or_else(|| {
             if options.confirm_missing_server {
                 Error::State("confirmed missing active server cannot be snapshotted; destroy the retained state".into())
@@ -579,6 +648,7 @@ else git switch "$work"; fi
                 "provider server identity changed or has attached volumes".into(),
             ));
         }
+        console::success("Provider", "Active Droplet verified");
         let op = Uuid::new_v4().to_string();
         let mut t = existing.unwrap_or(Transition {
             schema_version: 1,
@@ -605,6 +675,7 @@ else git switch "$work"; fi
         let name = format!("vps-{id}-{}", t.operation_id);
         let mut host_key = t.checkpoints.captured_host_key.clone().unwrap_or_default();
         if t.phase == Phase::PausingQuiescing {
+            console::pending("Worker", "Stopping remote control and running containers");
             let command = format!(
                 r#"bash -s -- '{}' <<'VPS_PAUSE'
 set -euo pipefail
@@ -642,8 +713,10 @@ VPS_PAUSE"#,
             t.checkpoints.quiescence_verified = true;
             t.phase = Phase::PausingShutdown;
             self.store.save_transition(id, &t)?;
+            console::success("Worker", "Workloads stopped and disk synchronized");
         }
         if t.phase == Phase::PausingShutdown {
+            console::pending("Provider", "Shutting down the Droplet");
             let a = self
                 .continue_action(
                     &mut t,
@@ -682,8 +755,10 @@ VPS_PAUSE"#,
             }
             t.phase = Phase::PausingSnapshot;
             self.store.save_transition(id, &t)?;
+            console::success("Provider", "Droplet is powered off");
         }
         if t.phase == Phase::PausingSnapshot {
+            console::pending("Snapshot", "Creating the recovery snapshot");
             let a = self
                 .continue_action(
                     &mut t,
@@ -751,6 +826,7 @@ VPS_PAUSE"#,
         t.phase = Phase::PausingDeletePending;
         t.checkpoints.source_delete_intent = true;
         self.store.save_transition(id, &t)?;
+        console::success("Snapshot", "Recovery snapshot verified");
         self.finish_pause_delete(id, i, t, options).await
     }
 
@@ -769,6 +845,7 @@ VPS_PAUSE"#,
             .snapshot
             .clone()
             .ok_or_else(|| Error::State("pause snapshot missing".into()))?;
+        console::pending("Provider", "Deleting the paused source Droplet");
         if self.backend.get_server(&source.id).await?.is_some() {
             confirmed(self.backend.delete_server(&source.id).await?)?;
         } else if !t.checkpoints.source_delete_confirmed && !options.confirm_missing_server {
@@ -782,6 +859,10 @@ VPS_PAUSE"#,
         i.lifecycle = Lifecycle::Paused { snapshot: snap };
         self.store.save(&i)?;
         self.store.clear_transition(id)?;
+        console::success(
+            "Provider",
+            "Source Droplet deleted; compute billing stopped",
+        );
         Ok(i)
     }
 
@@ -816,30 +897,42 @@ VPS_PAUSE"#,
                 .backend
                 .find_actions(resource, kind, &t.started_at)
                 .await?;
-            if found.len() != 1 {
-                if found.is_empty() && confirm_request_not_accepted {
-                    if shutdown {
-                        t.checkpoints.shutdown_intent = false
-                    } else {
-                        t.checkpoints.snapshot_intent = false
-                    };
-                    self.store.save_transition(id, t)?;
-                    return Err(Error::Uncertain(format!(
-                        "cleared unaccepted {kind} intent; rerun to submit it"
-                    )));
+            if found.len() == 1 {
+                if shutdown {
+                    t.checkpoints.shutdown_action = Some(found[0].id.clone())
+                } else {
+                    t.checkpoints.snapshot_action = Some(found[0].id.clone())
                 }
+                self.store.save_transition(id, t)?;
+                return Ok(found[0].clone());
+            }
+            if !found.is_empty() {
                 return Err(Error::Uncertain(format!(
                     "{} matching {kind} actions found",
                     found.len()
                 )));
             }
-            if shutdown {
-                t.checkpoints.shutdown_action = Some(found[0].id.clone())
-            } else {
-                t.checkpoints.snapshot_action = Some(found[0].id.clone())
+            if !confirm_request_not_accepted {
+                console::action(
+                    "Confirmation",
+                    format!(
+                        "Verify no {kind} action exists, then rerun with --confirm-request-not-accepted"
+                    ),
+                );
+                return Err(Error::Uncertain(format!(
+                    "no matching {kind} action found; explicit confirmation is required before resubmission"
+                )));
             }
+            if shutdown {
+                t.checkpoints.shutdown_intent = false
+            } else {
+                t.checkpoints.snapshot_intent = false
+            };
             self.store.save_transition(id, t)?;
-            return Ok(found[0].clone());
+            console::success(
+                "Confirmation",
+                format!("Prior {kind} request confirmed absent; resubmitting"),
+            );
         }
         if shutdown {
             t.checkpoints.shutdown_intent = true
@@ -896,22 +989,33 @@ VPS_PAUSE"#,
                 .backend
                 .find_actions(resource, "power_off", &t.started_at)
                 .await?;
-            if found.len() != 1 {
-                if found.is_empty() && confirm {
-                    t.checkpoints.power_off_intent = false;
-                    self.store.save_transition(id, t)?;
-                    return Err(Error::Uncertain(
-                        "cleared unaccepted power-off intent; rerun to submit it".into(),
-                    ));
-                }
+            if found.len() == 1 {
+                t.checkpoints.power_off_action = Some(found[0].id.clone());
+                self.store.save_transition(id, t)?;
+                return Ok(found[0].clone());
+            }
+            if !found.is_empty() {
                 return Err(Error::Uncertain(format!(
                     "{} matching power_off actions found",
                     found.len()
                 )));
             }
-            t.checkpoints.power_off_action = Some(found[0].id.clone());
+            if !confirm {
+                console::action(
+                    "Confirmation",
+                    "Verify no power-off action exists, then rerun with --confirm-request-not-accepted",
+                );
+                return Err(Error::Uncertain(
+                    "no matching power-off action found; explicit confirmation is required before resubmission"
+                        .into(),
+                ));
+            }
+            t.checkpoints.power_off_intent = false;
             self.store.save_transition(id, t)?;
-            return Ok(found[0].clone());
+            console::success(
+                "Confirmation",
+                "Prior power-off request confirmed absent; resubmitting",
+            );
         }
         t.checkpoints.power_off_intent = true;
         self.store.save_transition(id, t)?;
@@ -926,7 +1030,8 @@ VPS_PAUSE"#,
         }
     }
     pub async fn resume(&self, id: &str, options: ResumeOptions) -> Result<Instance> {
-        let _lock = self.store.lock(id)?;
+        console::heading("Resume", id);
+        let _lock = self.store.lock_existing(id)?;
         let mut i = self.store.load_or_adopt_locked(id)?;
         let existing = self.store.transition(id)?;
         if let Some(t) = &existing {
@@ -972,6 +1077,7 @@ VPS_PAUSE"#,
             .source_recipe
             .clone()
             .ok_or_else(|| Error::State("paused state lacks an exact source recipe".into()))?;
+        console::pending("Snapshot", "Verifying the retained recovery snapshot");
         let current_snapshot = self.backend.get_snapshot(&snap.id).await?.ok_or_else(|| {
             if options.confirm_missing_snapshot {
                 Error::State("confirmed missing snapshot cannot be resumed".into())
@@ -987,6 +1093,7 @@ VPS_PAUSE"#,
             &source_recipe.region,
             snap.min_disk_gb,
         )?;
+        console::success("Snapshot", "Recovery snapshot verified");
         let mut recipe = CreateRecipe {
             name: source_recipe.name,
             region: source_recipe.region,
@@ -1022,8 +1129,10 @@ VPS_PAUSE"#,
             .clone()
             .ok_or_else(|| Error::State("resume correlation missing".into()))?;
         let server = if let Some(target) = t.target.clone() {
+            console::pending("Provider", "Resuming the persisted replacement Droplet");
             target
         } else {
+            console::pending("Provider", "Creating the replacement Droplet");
             if t.checkpoints.target_create_intent {
                 let m = self.backend.find_servers(&correlation).await?;
                 if m.len() != 1 {
@@ -1072,6 +1181,7 @@ VPS_PAUSE"#,
         // Correlation discovery may return a target before networking is assigned. Refresh
         // only the exact discovered ID and persist the resulting immutable inventory.
         let mut server = server;
+        console::pending("Provider", "Waiting for replacement public networking");
         for _ in 0..60 {
             server = self.backend.get_server(&server.id).await?.ok_or_else(|| {
                 Error::Uncertain("correlated replacement disappeared by exact ID".into())
@@ -1097,6 +1207,7 @@ VPS_PAUSE"#,
         t.target = Some(server.clone());
         t.phase = Phase::ResumingRecovery;
         self.store.save_transition(id, &t)?;
+        console::success("Provider", "Replacement Droplet has public networking");
         let known = self.store.dir(id).join("known_hosts");
         let endpoint = server
             .endpoint
@@ -1113,6 +1224,25 @@ VPS_PAUSE"#,
             }
         }
         let key = key(self.config)?;
+        console::pending("Worker", "Waiting for SSH on the replacement Droplet");
+        let mut last_ssh_error = None;
+        for _ in 0..60 {
+            match ssh::stdin(&server, key, &known, "true", &[], false) {
+                Ok(_) => {
+                    last_ssh_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_ssh_error = Some(error);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+        if let Some(error) = last_ssh_error {
+            return Err(error);
+        }
+        console::success("Worker", "SSH is ready");
+        console::pending("Worker", "Verifying snapshot identity and SSH host key");
         let actual_key = ssh::capture(
             &server,
             key,
@@ -1141,6 +1271,7 @@ VPS_PAUSE"#,
                 "pause marker operation or host key does not match the snapshot".into(),
             ));
         }
+        console::success("Worker", "Snapshot identity and SSH host key verified");
         let running = marker
             .running_container_ids
             .iter()
@@ -1177,7 +1308,9 @@ checkout={checkout}; origin={origin}; branch={branch}
             origin = shq(&format!("https://github.com/{}.git", i.repository)),
             branch = shq(&i.work_branch),
         );
+        console::pending("Worker", "Restarting containers and verifying the checkout");
         ssh::stdin(&server, key, &known, "bash -s", recovery.as_bytes(), false)?;
+        console::success("Worker", "Containers and checkout recovered");
 
         let dir = self.store.dir(id);
         for ownership in ["chatgpt-login.json", "remote-control.json"] {
@@ -1187,7 +1320,7 @@ checkout={checkout}; origin={origin}; branch={branch}
                 )));
             }
         }
-        self.install_github_token(&i, &server, &known).await?;
+        let actor = self.install_github_token(&i, &server, &known).await?;
         let token = crate::github::retained_token(&dir)?
             .ok_or_else(|| Error::State("GitHub token disappeared after installation".into()))?;
         let verify_token = r#"set -euo pipefail
@@ -1203,12 +1336,16 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             token.as_bytes(),
             false,
         )?;
-        let login = ssh::capture(&server, key, &known, "/usr/local/bin/codex login status")?;
-        if !login.contains("Logged in using ChatGPT") {
+        if !chatgpt_logged_in(&server, key, &known)? {
             return Err(Error::Remote(
                 "snapshotted ChatGPT login is unavailable".into(),
             ));
         }
+        console::success("GitHub", format!("Authenticated as {actor}"));
+        console::pending(
+            "Remote control",
+            "Reconnecting with the preserved host enrollment",
+        );
         let start: serde_json::Value = serde_json::from_str(&ssh::capture(
             &server,
             key,
@@ -1218,15 +1355,10 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         if !remote_usable(&start) {
             return Err(Error::Remote("remote control did not become usable".into()));
         }
-        let pair: serde_json::Value = serde_json::from_str(&ssh::capture(
-            &server,
-            key,
-            &known,
-            "/usr/local/bin/codex remote-control --json pair",
-        )?)?;
-        let code = pairing_code(&pair)
-            .ok_or_else(|| Error::Remote("remote control returned no pairing code".into()))?;
-        eprintln!("pairing code: {code}");
+        console::success(
+            "Remote control",
+            "Reconnected using the preserved host enrollment",
+        );
         t.checkpoints.recovery_verified_at = Some(now());
         t.phase = Phase::ActiveSnapshotCleanupPending;
         self.store.save_transition(id, &t)?;
@@ -1260,6 +1392,7 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         }
         t.checkpoints.snapshot_delete_intent = true;
         self.store.save_transition(id, &t)?;
+        console::pending("Snapshot", "Deleting the consumed recovery snapshot");
         if let Some(found) = self.backend.get_snapshot(&snap.id).await? {
             let source_region = snap
                 .source_recipe
@@ -1296,10 +1429,12 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         };
         self.store.save(&i)?;
         self.store.clear_transition(id)?;
+        console::success("Snapshot", "Consumed recovery snapshot deleted");
         Ok(i)
     }
     pub async fn destroy(&self, id: &str, options: DestroyOptions) -> Result<()> {
-        let _lock = self.store.lock(id)?;
+        console::heading("Destroy", id);
+        let _lock = self.store.lock_existing(id)?;
         let i = self.store.load_or_adopt_locked(id)?;
         let existing = self.store.transition(id)?;
         if matches!(i.lifecycle, Lifecycle::SourceReserved { .. }) {
@@ -1309,15 +1444,22 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
                 ));
             }
             for token in crate::github::retained_tokens(&self.store.dir(id))? {
+                console::pending("GitHub", "Revoking the retained repository credential");
                 if let Err(error) = crate::github::revoke(&token).await
                     && !options.forget_unrevoked_token
                 {
                     return Err(error);
                 }
+                console::success("GitHub", "Repository credential revoked");
             }
             fs::remove_dir_all(self.store.dir(id))?;
+            console::success("Local state", "Instance state removed");
             return Ok(());
         }
+        console::pending(
+            "Inventory",
+            "Reconciling provider resources and pending operations",
+        );
         let mut servers = Vec::<Server>::new();
         let mut snapshots = Vec::<Snapshot>::new();
         let mut correlations = Vec::<String>::new();
@@ -1429,6 +1571,14 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         servers.dedup_by(|a, b| a.id == b.id);
         snapshots.sort_by(|a, b| a.id.cmp(&b.id));
         snapshots.dedup_by(|a, b| a.id == b.id);
+        console::success(
+            "Inventory",
+            format!(
+                "Reconciled {} server(s) and {} snapshot(s)",
+                servers.len(),
+                snapshots.len()
+            ),
+        );
         // Persist the complete inventory and teardown decision before the first mutation.
         let teardown = Transition {
             schema_version: 1,
@@ -1454,6 +1604,7 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
         };
         self.store.save_transition(id, &teardown)?;
         for s in &servers {
+            console::pending("Provider", "Deleting the provider server");
             if self.backend.get_server(&s.id).await?.is_none() {
                 if !options.confirm_missing_server {
                     return Err(Error::Uncertain(format!(
@@ -1464,16 +1615,20 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             } else {
                 confirmed(self.backend.delete_server(&s.id).await?)?;
             }
+            console::success("Provider", "Provider server deletion confirmed");
         }
         // Credentials are revoked only after every inventoried server has confirmed deletion.
         for token in crate::github::retained_tokens(&self.store.dir(id))? {
+            console::pending("GitHub", "Revoking the retained repository credential");
             if let Err(e) = crate::github::revoke(&token).await
                 && !options.forget_unrevoked_token
             {
                 return Err(e);
             }
+            console::success("GitHub", "Repository credential revoked");
         }
         for s in &snapshots {
+            console::pending("Snapshot", "Deleting the retained snapshot");
             let direct = self.backend.get_snapshot(&s.id).await?;
             if let Some(ref found) = direct {
                 let source_region = s
@@ -1499,8 +1654,10 @@ GH_TOKEN="$(cat "$candidate")" /usr/local/bin/gh auth status >/dev/null
             } else {
                 confirmed(self.backend.delete_snapshot(&s.id).await?)?;
             }
+            console::success("Snapshot", "Retained snapshot deletion confirmed");
         }
         fs::remove_dir_all(self.store.dir(id))?;
+        console::success("Local state", "Instance state removed");
         Ok(())
     }
 }

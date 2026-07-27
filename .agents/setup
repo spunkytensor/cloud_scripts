@@ -2,16 +2,13 @@
 
 set -euo pipefail
 
-readonly DOCTL_VERSION="1.164.0"
 readonly RUST_VERSION="1.96.1"
 readonly -a REQUIRED_PACKAGES=(
+  build-essential
   ca-certificates
   curl
-  gh
   git
-  jq
   openssh-client
-  shellcheck
 )
 
 missing_packages=()
@@ -27,39 +24,6 @@ if (( ${#missing_packages[@]} > 0 )); then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
 else
   printf 'System packages are already installed.\n'
-fi
-
-if ! command -v doctl >/dev/null 2>&1 ||
-  ! doctl version 2>/dev/null | grep -Fq "doctl version ${DOCTL_VERSION}"; then
-  case "$(uname -m)" in
-    x86_64) doctl_arch="amd64" ;;
-    aarch64 | arm64) doctl_arch="arm64" ;;
-    *)
-      printf 'Unsupported architecture for doctl: %s\n' "$(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-
-  printf 'Installing doctl %s for linux-%s.\n' "${DOCTL_VERSION}" "${doctl_arch}"
-  temporary_dir="$(mktemp -d)"
-  trap 'rm -rf "${temporary_dir}"' EXIT
-  archive="doctl-${DOCTL_VERSION}-linux-${doctl_arch}.tar.gz"
-  release_url="https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}"
-  curl --fail --location --silent --show-error \
-    --output "${temporary_dir}/${archive}" "${release_url}/${archive}"
-  curl --fail --location --silent --show-error \
-    --output "${temporary_dir}/checksums.sha256" \
-    "${release_url}/doctl-${DOCTL_VERSION}-checksums.sha256"
-  (
-    cd "${temporary_dir}"
-    grep -F "  ${archive}" checksums.sha256 | sha256sum --check --strict -
-    tar -xzf "${archive}" doctl
-  )
-  sudo install -m 0755 "${temporary_dir}/doctl" /usr/local/bin/doctl
-  rm -rf "${temporary_dir}"
-  trap - EXIT
-else
-  printf 'doctl %s is already installed.\n' "${DOCTL_VERSION}"
 fi
 
 if [[ ! -x "${HOME}/.cargo/bin/rustup" ]]; then
@@ -80,4 +44,4 @@ for rust_tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfm
   ln -sfn "${HOME}/.cargo/bin/${rust_tool}" "${HOME}/.local/bin/${rust_tool}"
 done
 
-printf 'Orb setup complete. Copy config.example.env to config.env only when operator credentials are available.\n'
+printf 'Orb setup complete. Copy vps.example.toml to vps.toml only when operator credentials are available.\n'

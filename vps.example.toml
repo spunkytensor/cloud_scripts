@@ -1,8 +1,7 @@
 version = 1
 default_backend = "digitalocean"
 
-# Optional. When omitted, vps uses the platform state directory. During the
-# Bash migration it discovers a repository-local .state/instances directory.
+# Optional. When omitted, vps uses the platform state directory.
 # state_dir = "/absolute/path/to/vps-state/instances"
 
 [ssh]
