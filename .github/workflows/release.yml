@@ -29,7 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy && rustup default "$RUST_TOOLCHAIN"
@@ -76,10 +76,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos
             target: aarch64-apple-darwin
             kind: tar
-          - os: windows-2022
+          - os: windows
             target: x86_64-pc-windows-msvc
             kind: zip
           - os: ubuntu-22.04
@@ -89,7 +89,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install exact toolchain and target
         shell: bash
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target '${{ matrix.target }}' && rustup default "$RUST_TOOLCHAIN"
@@ -177,32 +177,47 @@ jobs:
           output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
           version: v0.72.0
       - name: Gate staged filesystem
+        if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: target/stage
           scanners: vuln,misconfig,secret
+          format: table
+          output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.trivy.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: '1'
           version: v0.72.0
       - name: Gate generated SBOM
+        if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: sbom
           scan-ref: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
+          format: table
+          output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.sbom-trivy.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: '1'
           version: v0.72.0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload SBOM and Trivy reports directly
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-${{ matrix.target }}
+          path: |
+            target/*.cdx.json
+            target/*trivy.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
             target/*.tar.gz
             target/*.zip
             target/*.deb
-            target/*.cdx.json
           if-no-files-found: error
           retention-days: 7
 
@@ -216,7 +231,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
@@ -224,7 +239,7 @@ jobs:
       - name: Generate SHA-256 checksums
         run: cd dist && sha256sum * > SHA256SUMS
       - name: Attest all release subjects
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/*
       - name: Publish immutable GitHub release
