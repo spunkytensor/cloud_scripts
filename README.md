@@ -134,7 +134,7 @@ vps status frontend-a --refresh
 vps shell frontend-a
 ```
 
-`list` and `status` read local state by default. `status --refresh` performs a read-only provider lookup. `shell` connects directly as `agent` using the recorded endpoint, configured private key, and instance-specific known-hosts file.
+`list` reads local status for every persisted instance across all backends and identifies each instance's backend in the normal table. `status` also reads local state by default; `status --refresh` performs a read-only lookup against the backend recorded in that instance. `shell` connects directly as `agent` using the recorded endpoint, configured private key, and instance-specific known-hosts file.
 
 Lifecycle progress is written to stderr; the result and next useful command are written to stdout. Add `--verbose` for provider IDs, addresses, snapshots, and extended list columns. Use `--output json` for the complete versioned state object. Set `NO_COLOR` to disable terminal color.
 

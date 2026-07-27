@@ -21,11 +21,6 @@ async fn main() {
 }
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    if cli.backend != "digitalocean" {
-        return Err(Error::Cli(
-            "unknown backend; compiled backends: digitalocean".into(),
-        ));
-    }
     if let Commands::Completion { shell } = &cli.command {
         let mut c = cli::command();
         clap_complete::generate(*shell, &mut c, "vps", &mut io::stdout());
@@ -35,9 +30,29 @@ async fn run() -> Result<()> {
     let store = Store::new(root.clone());
     if matches!(
         cli.command,
-        Commands::List { .. } | Commands::Status { refresh: false, .. } | Commands::Shell { .. }
+        Commands::List | Commands::Status { refresh: false, .. } | Commands::Shell { .. }
     ) {
         return local(cli, &cfg, &store);
+    }
+    let backend_name = match &cli.command {
+        Commands::Create { backend, .. } => {
+            backend.as_ref().unwrap_or(&cfg.default_backend).clone()
+        }
+        Commands::Doctor => cfg.default_backend.clone(),
+        Commands::Pause { instance, .. }
+        | Commands::Resume { instance, .. }
+        | Commands::Destroy { instance, .. }
+        | Commands::Status {
+            instance,
+            refresh: true,
+        } => store.load_or_adopt(instance)?.backend,
+        Commands::List | Commands::Shell { .. } | Commands::Completion { .. } => unreachable!(),
+        Commands::Status { refresh: false, .. } => unreachable!(),
+    };
+    if backend_name != "digitalocean" {
+        return Err(Error::Cli(format!(
+            "backend {backend_name} is not available; compiled backends: digitalocean"
+        )));
     }
     let backend = DigitalOcean::new(&cfg.backends.digitalocean)?;
     let life = ControlPlane {
@@ -48,6 +63,7 @@ async fn run() -> Result<()> {
     match cli.command {
         Commands::Create {
             name,
+            backend: _,
             repository,
             branch,
         } => {
@@ -146,7 +162,7 @@ async fn run() -> Result<()> {
                 cli.home.as_deref(),
             )?
         }
-        Commands::List { .. }
+        Commands::List
         | Commands::Shell { .. }
         | Commands::Status { refresh: false, .. }
         | Commands::Completion { .. } => unreachable!(),
@@ -155,7 +171,7 @@ async fn run() -> Result<()> {
 }
 fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
     match cli.command {
-        Commands::List { .. } => {
+        Commands::List => {
             let mut rows = vec![];
             for id in s.ids()? {
                 match load_or_import(s, &id) {
@@ -209,6 +225,7 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
                         summary(&i, s.transition(&i.instance_id).ok().flatten().as_ref());
                     table_rows.push([
                         i.instance_id,
+                        i.backend,
                         status,
                         format!("{}@{}", i.repository, i.base_branch),
                         i.work_branch,
@@ -217,7 +234,7 @@ fn local(cli: Cli, cfg: &Config, s: &Store) -> Result<()> {
                 println!(
                     "{}",
                     table(
-                        ["INSTANCE", "STATUS", "REPOSITORY", "WORK BRANCH"],
+                        ["INSTANCE", "BACKEND", "STATUS", "REPOSITORY", "WORK BRANCH"],
                         &table_rows,
                     )
                 );

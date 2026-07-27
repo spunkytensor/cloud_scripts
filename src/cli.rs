@@ -11,8 +11,6 @@ pub enum Output {
 #[derive(Debug, Parser)]
 #[command(name = "vps", version, about = "Disposable cloud worker control plane")]
 pub struct Cli {
-    #[arg(long, global = true, default_value = "digitalocean")]
-    pub backend: String,
     #[arg(
         long,
         global = true,
@@ -40,14 +38,16 @@ pub enum Commands {
     Create {
         #[arg(long)]
         name: Option<String>,
+        #[arg(
+            long,
+            help = "Provider backend [default: default_backend from vps.toml]"
+        )]
+        backend: Option<String>,
         repository: String,
         #[arg(long, default_value = "main")]
         branch: String,
     },
-    List {
-        #[arg(long)]
-        all_backends: bool,
-    },
+    List,
     Status {
         instance: String,
         #[arg(long)]
