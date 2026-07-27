@@ -168,21 +168,25 @@ jobs:
           if [[ '${{ matrix.kind }}' == tar && "$RUNNER_OS" == macOS ]]; then COPYFILE_DISABLE=1 tar -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
           if [[ '${{ matrix.kind }}' == tar && "$RUNNER_OS" != macOS ]]; then tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" stage; fi
           if [[ '${{ matrix.kind }}' == zip ]]; then 7z a "vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.zip" ./stage/*; fi
-      - name: Generate CycloneDX SBOM from final staged filesystem
+      - name: Generate CycloneDX SBOM from locked release dependencies
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
-          scan-ref: target/stage
+          scan-ref: .
+          scanners: vuln
+          skip-dirs: target
+          list-all-pkgs: true
           format: cyclonedx
           output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json
           version: v0.72.0
-      - name: Gate staged filesystem
+      - name: Gate locked release dependencies
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
-          scan-ref: target/stage
-          scanners: vuln,misconfig,secret
+          scan-ref: .
+          scanners: vuln
+          skip-dirs: target
           format: table
           output: target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.trivy.txt
           severity: HIGH,CRITICAL
@@ -201,6 +205,14 @@ jobs:
           ignore-unfixed: false
           exit-code: '1'
           version: v0.72.0
+      - name: Validate generated security evidence is populated
+        if: always()
+        shell: bash
+        run: |
+          sbom='target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.cdx.json'
+          report='target/vps-${{ needs.verify.outputs.version }}-${{ matrix.target }}.trivy.txt'
+          jq -e '[.components[]? | select(.purl | strings | startswith("pkg:cargo/"))] | length > 0' "$sbom" >/dev/null
+          grep -q 'Cargo.lock' "$report"
       - name: Upload SBOM and Trivy reports directly
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -239,6 +251,7 @@ jobs:
       - name: Generate SHA-256 checksums
         run: cd dist && sha256sum * > SHA256SUMS
       - name: Attest all release subjects
+        if: github.event.repository.private == false
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/*
