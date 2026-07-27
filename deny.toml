@@ -1,0 +1,54 @@
+# cargo-deny policy. Exceptions must name an owner, rationale, tracking issue,
+# and removal/review date; there are intentionally no exceptions at present.
+[graph]
+all-features = true
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  # webpki-roots distributes Mozilla's root-certificate data under CDLA-Permissive.
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  # option-ext is linked as a library; MPL-2.0 obligations remain file-scoped.
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+# The executable is intentionally unpublished; continue enforcing the allowlist for every
+# third-party dependency independently of this project's Apache-2.0 license.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# This project uses rustls. Native TLS stacks require an explicit policy review.
+deny = [
+  { name = "native-tls", reason = "unapproved platform TLS stack; use rustls" },
+  { name = "openssl", reason = "unapproved OpenSSL dependency; use rustls" },
+  { name = "openssl-sys", reason = "unapproved OpenSSL FFI; use rustls" },
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[output]
+feature-depth = 1

@@ -1,0 +1,21 @@
+version = 1
+default_backend = "digitalocean"
+
+[ssh]
+private_key = "~/.ssh/id_digitalocean"
+
+[git]
+author_name = "Codex VPS Agent"
+author_email = "codex-vps-agent@users.noreply.github.com"
+
+[backends.digitalocean]
+# Optional when the account has exactly one SSH key. Otherwise set its ID or fingerprint.
+# ssh_key = "replace-with-key-id-or-fingerprint"
+region = "nyc3"
+size = "s-4vcpu-8gb"
+image = "ubuntu-24-04-x64"
+tags = ["codex-agent"]
+name_prefix = "codex-agent"
+
+# Set DIGITALOCEAN_TOKEN in the environment. Never put cloud or GitHub tokens
+# in this file.
