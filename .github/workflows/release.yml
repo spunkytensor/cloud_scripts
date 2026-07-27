@@ -112,7 +112,7 @@ jobs:
           rm -rf "$dest"
           mkdir -p "$dest/bin" "$dest/completions"
           install -m 0755 "$binary" "$dest/bin/vps"
-          install -m 0644 README.md vps.example.toml target/THIRD_PARTY_LICENSES.txt "$dest/"
+          install -m 0644 README.md target/THIRD_PARTY_LICENSES.txt "$dest/"
           test ! -f LICENSE || install -m 0644 LICENSE "$dest/"
           "$binary" completion bash >"$dest/completions/vps.bash"
           "$binary" completion zsh >"$dest/completions/_vps"
@@ -139,7 +139,6 @@ jobs:
           install -m 0644 "$stage/completions/_vps" "$root/usr/share/zsh/vendor-completions/_vps"
           install -m 0644 "$stage/completions/vps.fish" "$root/usr/share/fish/vendor_completions.d/vps.fish"
           install -m 0644 "$stage/README.md" "$root/usr/share/doc/vps/README.md"
-          install -m 0644 "$stage/vps.example.toml" "$root/usr/share/doc/vps/vps.example.toml"
           install -m 0644 "$stage/THIRD_PARTY_LICENSES.txt" "$root/usr/share/doc/vps/"
           test ! -f "$stage/LICENSE" || install -m 0644 "$stage/LICENSE" "$root/usr/share/doc/vps/"
           cat >"$root/DEBIAN/control" <<'EOF'
