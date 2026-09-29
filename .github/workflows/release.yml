@@ -24,7 +24,9 @@ env:
 
 jobs:
   source:
-    uses: spunkytensor/.github/.github/workflows/trivy.yml@69b5f260fb4358acb0e2f7b2a96254ad9cc2322c
+    uses: spunkytensor/.github/.github/workflows/trivy.yml@ed53814ed23f76c11fa4a91f57f99de903c18bfc
+    with:
+      baseline-sha: ed53814ed23f76c11fa4a91f57f99de903c18bfc
 
   verify:
     needs: source

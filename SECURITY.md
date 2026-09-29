@@ -19,8 +19,8 @@ before updating. Release support and end dates must be declared before shipping.
 
 ## Spunky Tensor security
 
-This repository adopts the [shared baseline](https://github.com/spunkytensor/.github/blob/69b5f260fb4358acb0e2f7b2a96254ad9cc2322c/docs/baseline.md)
-at commit `69b5f260fb4358acb0e2f7b2a96254ad9cc2322c`, with incomplete adoption
+This repository adopts the [shared baseline](https://github.com/spunkytensor/.github/blob/ed53814ed23f76c11fa4a91f57f99de903c18bfc/docs/baseline.md)
+at commit `ed53814ed23f76c11fa4a91f57f99de903c18bfc`, with incomplete adoption
 explicitly recorded below. `.github/workflows/public-repo-security.yml` runs on
 every PR, `main` push, and nightly at **09:49 UTC** (01:49 PST / 02:49 PDT).
 Trivy 0.74.0 scans resolved source dependencies,
@@ -60,14 +60,12 @@ the original artifact filenames. Nothing is published from pull requests.
 ## Remaining adoption gaps
 
 - **Administration:** private reporting is disabled. Dependency graph, Dependabot
-  alerts/security updates, secret scanning/push protection, CodeQL availability,
+  alerts/security updates, secret scanning/push protection,
   required checks/reviews, code-owner enforcement, maintainer 2FA and access review
   need administrator verification. Branch protection inspection returned HTTP 403.
-  This rollout changes no settings. Rust CodeQL integration remains outstanding;
-  dependency review is configured for PRs, but the first hosted run failed with
-  "Dependency review is not supported on this repository. Please ensure that
-  Dependency graph is enabled." An admin must enable/verify the dependency graph
-  and rerun the check; the failure is not suppressed by this workflow.
+  This rollout changes no settings. Full-inventory Trivy replaces the hosted
+  dependency-review gate; neither dependency review nor hosted CodeQL is required
+  by the private-compatible baseline.
 - **Freshness:** the central report can discover the caller path above, but its
   deployment and >36-hour stale-scan alert delivery need verification. No successful
   nightly run is claimed before merge. GitHub schedules are best effort and can
