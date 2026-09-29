@@ -64,7 +64,10 @@ the original artifact filenames. Nothing is published from pull requests.
   required checks/reviews, code-owner enforcement, maintainer 2FA and access review
   need administrator verification. Branch protection inspection returned HTTP 403.
   This rollout changes no settings. Rust CodeQL integration remains outstanding;
-  dependency review is configured for PRs and requires dependency graph availability.
+  dependency review is configured for PRs, but the first hosted run failed with
+  "Dependency review is not supported on this repository. Please ensure that
+  Dependency graph is enabled." An admin must enable/verify the dependency graph
+  and rerun the check; the failure is not suppressed by this workflow.
 - **Freshness:** the central report can discover the caller path above, but its
   deployment and >36-hour stale-scan alert delivery need verification. No successful
   nightly run is claimed before merge. GitHub schedules are best effort and can
