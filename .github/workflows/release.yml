@@ -100,7 +100,7 @@ jobs:
         run: |
           source packaging/tools.env
           cargo install cargo-about --version "=${CARGO_ABOUT_VERSION}" --locked
-          cargo about generate --config packaging/about.toml packaging/about.hbs > target/THIRD_PARTY_LICENSES.txt
+          cargo about generate --config packaging/about.toml --output-file target/THIRD_PARTY_LICENSES.txt packaging/about.hbs
       - name: Stage Unix artifact
         if: runner.os != 'Windows'
         shell: bash

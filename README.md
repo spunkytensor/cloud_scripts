@@ -23,7 +23,7 @@ This project moves agent-driven development off the developer's laptop and onto 
 - A Droplet remains billable until `vps destroy` or `vps pause` confirms its deletion. 
 - `vps pause` is a cold suspend. It quiesces the worker, snapshots the boot disk, and deletes the Droplet. Compute billing stops after confirmed deletion (private snapshot storage remains billable, but is much less expensive).
 - A paused snapshot contains the checkout, databases, GitHub PAT, and ChatGPT login. Treat it as a credential-bearing private machine image; never share or publish it. Normal resume and destroy remove it.
-- Each instance uses a dedicated fine-grained GitHub PAT restricted to its repository. The worker keeps that credential for Git and `gh`; the control machine retains a mode-`0600` copy so teardown can revoke it if the worker is unreachable.
+- Create a dedicated fine-grained GitHub PAT restricted to each instance's repository; this restriction is an operator responsibility, not verified by `vps`. The worker keeps that credential for Git and `gh`; the control machine retains a copy (mode `0600` on Unix) so teardown can revoke it if the worker is unreachable.
 - Repository code running as `agent` can read the worker's GitHub and ChatGPT credentials and has root-equivalent control through the Docker socket. Use only repositories and dependencies you trust.
 - Cloud-init authorizes the configured SSH key for the unprivileged `agent` user, disables root SSH login, and does not install the DigitalOcean token.
 - Initial SSH bootstrap uses trust on first use with an instance-specific known-hosts file. This does not protect the first connection from an active network attacker.
@@ -67,7 +67,9 @@ The setup sequence asks for:
 - the matching DigitalOcean SSH key ID or fingerprint, pre-populated when `doctl` reports exactly one account key;
 - DigitalOcean region, size, image, tags, and Droplet name prefix.
 
-Press Enter to accept each displayed default. Setup creates `~/.vps` with mode `0700` and writes the populated configuration to `~/.vps/vps.toml` with mode `0600`. 
+Press Enter to accept each displayed default. On Unix, setup creates `~/.vps` with mode `0700` and writes the populated configuration to `~/.vps/vps.toml` with mode `0600`.
+
+On Windows, `vps` does not set or verify file or directory ACLs. Before setup, choose a VPS home directory whose ACLs restrict access to your account and trusted system administrators. Verify inherited permissions before storing credentials there; do not use a shared directory. Unix `0600`/`0700` guarantees do not apply to Windows.
 
 With multiple account keys, setup displays their IDs, fingerprints, and names so you can choose one at the prompt. With no keys, or when `doctl` is unavailable or unauthenticated, setup leaves the SSH-key choice for you to enter. To list the same information manually when `doctl` is installed:
 
@@ -131,7 +133,7 @@ Creation:
 4. Clones the repository under `/home/agent/projects` and creates `codex/<instance-id>`.
 5. Runs ChatGPT device login when needed and starts Codex remote control.
 
-The pre-filled GitHub PAT form requests a two-day expiry, access only to the selected repository, `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`. Confirm any organization approval requirement before continuing. Pasted token input is not echoed.
+The pre-filled GitHub PAT form selects the repository owner and requests a two-day expiry, `Contents: read and write`, `Pull requests: read and write`, `Actions: read`, and `Commit statuses: read`. Under **Repository access**, manually choose **Only select repositories** and select only the intended repository. Verify the expiry, permissions, and any organization approval requirement before continuing. `vps` checks the fine-grained token prefix, authenticated user identity, and repository metadata access; it does not verify exclusive repository scope, expiry, or write permissions. Pasted token input is not echoed.
 
 Creation prints its generated or selected name before allocation begins. If creation is interrupted, rerun with `create --name <name> ...`, using that same name, repository, and base branch. The persisted journal reconciles the existing allocation instead of blindly creating another Droplet. Use `vps destroy <instance>` to abandon an incomplete setup.
 
@@ -192,6 +194,8 @@ DigitalOcean `404` responses are treated conservatively because they can mean ei
 - `--confirm-request-not-accepted`
 
 Use `--forget-unresolved-allocation` only after independently confirming that no resource exists for a retained allocation intent. Use `--forget-unrevoked-token` only after manually revoking the retained GitHub credential or knowingly accepting its remaining expiry window.
+
+GitHub's acceptance of a revocation request is not confirmation that the token is invalid. Teardown and credential replacement require an authenticated `/user` probe to return HTTP 401 before discarding credential evidence. An already revoked or expired token also satisfies this check. If the token still works, GitHub returns another status (including 403 or throttling), or a request fails, local state and replacement records remain available for retry. Wait for revocation to complete and rerun the same command; do not delete state to bypass the check.
 
 `vps list` reports transitional states such as `pausing-snapshot`, `resuming-recovery`, and `active-snapshot-cleanup-pending`. Shell access is refused during unsafe phases. If only snapshot cleanup remains, the worker stays usable and rerunning `vps resume <instance>` retries cleanup without allocating another Droplet.
 

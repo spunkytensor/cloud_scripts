@@ -3,10 +3,20 @@
 Third-party software licenses
 =============================
 
+Corresponding source for the unmodified crates used in this binary is available
+at the version-specific download URLs below. Each archive includes the crate's
+source and license notices, including source covered by the Mozilla Public
+License 2.0. Download and extract the archive to obtain that source.
+
 {{#each licenses}}
 -------------------------------------------------------------------------------
-License: {{name}}
+License: {{{name}}}
 Used by: {{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/each}}
 
-{{text}}
+Source downloads:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}: https://crates.io/api/v1/crates/{{crate.name}}/{{crate.version}}/download
+{{/each}}
+
+{{{text}}}
 {{/each}}

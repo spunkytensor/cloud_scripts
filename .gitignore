@@ -1,2 +1,5 @@
 .state/
 target/
+vps.toml
+.env
+.env.*
