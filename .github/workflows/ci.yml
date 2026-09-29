@@ -21,7 +21,7 @@ env:
 jobs:
   quality:
     name: fmt, clippy, docs, policy
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [blacksmith-2vcpu-ubuntu-2404, blacksmith-6vcpu-macos-latest, blacksmith-2vcpu-windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

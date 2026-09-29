@@ -48,6 +48,10 @@ xattr -d com.apple.quarantine /path/to/vps
 
 Run the command against the actual installed binary, such as `/usr/local/bin/vps`. Removing quarantine bypasses Gatekeeper's malware-verification prompt for that file, so do not use this workaround on an unverified download.
 
+### CI runners
+
+CI, security checks, and release workflows use [Blacksmith runners](https://docs.blacksmith.sh/introduction/quickstart). Enable the Blacksmith GitHub app for the organization and grant it access to this repository before running workflows. Linux and Windows jobs use 2-vCPU runners; macOS jobs use 6-vCPU Apple Silicon runners. Debian packages remain built on Ubuntu 22.04; other Linux jobs use Ubuntu 24.04. Windows jobs use Windows Server 2025, and macOS jobs track Blacksmith's latest macOS image.
+
 ## Configure
 
 `vps` initializes itself on first use. If the selected VPS home or its `vps.toml` is missing, run any command from an interactive terminal—for example:
