@@ -1,0 +1,7 @@
+# Repository ownership; enforcement requires branch rules configured by an admin.
+/.github/ @spunkytensor
+/SECURITY.md @spunkytensor
+/LICENSE @spunkytensor
+/THIRD_PARTY_NOTICES.txt @spunkytensor
+/packaging/ @spunkytensor
+/deny.toml @spunkytensor
