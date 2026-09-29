@@ -36,7 +36,7 @@ fn shq(value: &str) -> String {
 fn prompt_github_token(repository: &str, server_id: &str, replacement: bool) -> Result<String> {
     console::action("GitHub", "Authorization required");
     eprintln!(
-        "\n    {}\n\n    Create a fine-grained PAT that:\n      • targets only {repository}\n      • expires in two days\n      • grants Contents and Pull requests: read and write\n      • grants Actions and Commit statuses: read\n\n    Paste it below; input will not be echoed.\n",
+        "\n    {}\n\n    Create a fine-grained PAT that:\n      • uses Repository access → Only select repositories → {repository}\n      • expires in two days\n      • grants Contents and Pull requests: read and write\n      • grants Actions and Commit statuses: read\n\n    Select the repository manually and verify expiry and permissions.\n    vps checks user identity and repository metadata access, not exclusive scope or write permissions.\n    Paste it below; input will not be echoed.\n",
         crate::github::creation_url(repository, server_id)
     );
     if !io::stdin().is_terminal() {
@@ -1795,7 +1795,7 @@ async fn revoke_credentials(dir: &Path, forget_unrevoked_token: bool) -> Result<
     for token in crate::github::retained_tokens(dir)? {
         console::pending("GitHub", "Revoking the retained repository credential");
         match crate::github::revoke(&token).await {
-            Ok(()) => console::success("GitHub", "Repository credential revoked"),
+            Ok(()) => console::success("GitHub", "Repository credential confirmed invalid"),
             Err(error) if forget_unrevoked_token => {
                 all_revoked = false;
                 console::action(
