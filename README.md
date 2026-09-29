@@ -20,6 +20,13 @@ This project moves agent-driven development off the developer's laptop and onto 
 
 ## Security and cost model
 
+See the [security policy and supported releases](SECURITY.md),
+[third-party notices](THIRD_PARTY_NOTICES.txt), and
+[SBOM downloads and release evidence](SECURITY.md#sbom-downloads-and-release-evidence).
+**Spunky Tensor security** scans source nightly at 09:49 UTC. The
+[remaining adoption gaps](SECURITY.md#remaining-adoption-gaps) distinguish source
+coverage from native binaries and software installed on workers.
+
 - A Droplet remains billable until `vps destroy` or `vps pause` confirms its deletion. 
 - `vps pause` is a cold suspend. It quiesces the worker, snapshots the boot disk, and deletes the Droplet. Compute billing stops after confirmed deletion (private snapshot storage remains billable, but is much less expensive).
 - A paused snapshot contains the checkout, databases, GitHub PAT, and ChatGPT login. Treat it as a credential-bearing private machine image; never share or publish it. Normal resume and destroy remove it.
@@ -50,7 +57,7 @@ Run the command against the actual installed binary, such as `/usr/local/bin/vps
 
 ### CI runners
 
-CI, security checks, and release workflows use [Blacksmith runners](https://docs.blacksmith.sh/introduction/quickstart). Enable the Blacksmith GitHub app for the organization and grant it access to this repository before running workflows. Linux and Windows jobs use 2-vCPU runners; macOS jobs use 6-vCPU Apple Silicon runners. Debian packages remain built on Ubuntu 22.04; other Linux jobs use Ubuntu 24.04. Windows jobs use Windows Server 2025, and macOS jobs track Blacksmith's latest macOS image.
+CI, existing ecosystem security checks, and release builds use [Blacksmith runners](https://docs.blacksmith.sh/introduction/quickstart). The shared Trivy source scan and inventory reconciliation use GitHub-hosted Ubuntu runners. Enable the Blacksmith GitHub app for the organization and grant it access to this repository before running workflows. Linux and Windows jobs use 2-vCPU runners; macOS jobs use 6-vCPU Apple Silicon runners. Debian packages remain built on Ubuntu 22.04; other Linux jobs use Ubuntu 24.04. Windows jobs use Windows Server 2025, and macOS jobs track Blacksmith's latest macOS image.
 
 ## Configure
 
