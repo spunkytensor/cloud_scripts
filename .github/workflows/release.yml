@@ -43,7 +43,7 @@ jobs:
           version: v0.74.0
           cache: false
       - run: bash packaging/scan-lockfile.sh "$RUNNER_TEMP/lock-evidence"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: security-lockfile
@@ -274,7 +274,7 @@ jobs:
           PY
       - name: Upload SBOM and Trivy reports directly
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: security-${{ matrix.target }}
           path: |
@@ -286,7 +286,7 @@ jobs:
             target/*trivy.txt
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: |
